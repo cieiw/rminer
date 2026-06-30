@@ -393,7 +393,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             card,
-            text="Perfis para validar:",
+            text="Quantidade de reels:",
             text_color="#cfd7e3",
             font=ctk.CTkFont(size=13, weight="bold"),
         ).grid(row=3, column=2, padx=(18, 8), pady=10, sticky="w")
@@ -409,12 +409,12 @@ class App(ctk.CTk):
         self.profile_save_target_entry.grid(row=3, column=3, padx=8, pady=10, sticky="w")
         self.profile_save_target_entry.insert(
             0,
-            str(self.config.get("profile_save_target", self.config.get("download_target", "5"))),
+            str(self.config.get("reel_download_target", self.config.get("profile_save_target", self.config.get("download_target", "5")))),
         )
 
         ctk.CTkLabel(
             card,
-            text="perfis",
+            text="reels",
             text_color="#9aa4b2",
         ).grid(row=3, column=3, padx=(108, 8), pady=10, sticky="w")
 
@@ -700,7 +700,7 @@ class App(ctk.CTk):
                 "min_likes": self.min_likes_entry.get().strip() if hasattr(self, "min_likes_entry") else "1000",
                 "profile_keyword_required_count": self.required_entry.get().strip() if hasattr(self, "required_entry") else "1",
                 "profile_post_recent_days": self.recent_hours_entry.get().strip() if hasattr(self, "recent_hours_entry") else "1",
-                "profile_save_target": self.profile_save_target_entry.get().strip() if hasattr(self, "profile_save_target_entry") else "5",
+                "reel_download_target": self.profile_save_target_entry.get().strip() if hasattr(self, "profile_save_target_entry") else "5",
                 "parallel_tabs": self.parallel_tabs_entry.get().strip() if hasattr(self, "parallel_tabs_entry") else "4",
                 "reel_required_count": self.download_target_entry.get().strip() if hasattr(self, "download_target_entry") else "1",
                 "reel_recent_days": self.reel_hours_entry.get().strip() if hasattr(self, "reel_hours_entry") else "1",
@@ -2122,8 +2122,8 @@ class App(ctk.CTk):
         checked_shortcodes = set()
         state_lock = threading.Lock()
         workers = []
-        max_profiles = max(1, target_to_open)
-        max_cycles_per_worker = max(40, target_to_open * 20)
+        max_profiles = max(parallel_tabs * 10, target_to_open * 10)
+        max_cycles_per_worker = max(120, target_to_open * 100)
         target_reached_event = threading.Event()
 
         def discovered_count() -> int:
@@ -2333,7 +2333,7 @@ class App(ctk.CTk):
             self.set_result("NENHUM PERFIL", "#9aa4b2")
             return
 
-        self.log(f"Descoberta FY encontrou {len(profiles)} perfil(is): {', '.join('@' + p for p in profiles)}")
+        self.log(f"Descoberta FY encontrou {len(profiles)} perfil(is) candidato(s): {', '.join('@' + p for p in profiles)}")
         self.run_profile_list_validation(
             profile=profile,
             profiles_to_scan=profiles,
@@ -2532,7 +2532,7 @@ class App(ctk.CTk):
                         f"comentarios seletor={total_comments} | {current_count}/{target_to_open}"
                     )
                     self.set_result(f"APROVADO {current_count}/{target_to_open}", "#4ade80")
-                    break
+                    continue
                 else:
                     reason = selector_total.get("reason") if isinstance(selector_total, dict) else "sem retorno"
                     checked_shortcodes.add(shortcode)
@@ -2651,7 +2651,7 @@ class App(ctk.CTk):
             min_likes = self.parse_int_entry(self.min_likes_entry, default=1000, minimum=0)
             profile_keyword_required_count = self.parse_int_entry(self.required_entry, default=1, minimum=1)
             profile_post_days = self.parse_float_entry(self.recent_hours_entry, default=1.0, minimum=0.1)
-            profile_save_target = self.parse_int_entry(self.profile_save_target_entry, default=5, minimum=1)
+            reel_download_target = self.parse_int_entry(self.profile_save_target_entry, default=5, minimum=1)
 
             reel_required_count = self.parse_int_entry(self.download_target_entry, default=1, minimum=0)
             reel_max_days = self.parse_float_entry(self.reel_hours_entry, default=1.0, minimum=0.1)
@@ -2668,7 +2668,7 @@ class App(ctk.CTk):
                 self.set_result("SEM PALAVRAS", "#ff5f5f")
                 return
 
-            self.log(f"Meta de perfis para validar: {profile_save_target}.")
+            self.log(f"Meta de reels para baixar: {reel_download_target}.")
             self.log(
                 f"Validação do perfil: likes >= {min_likes}; "
                 f"comentários-chave >= {profile_keyword_required_count}; "
@@ -2687,7 +2687,7 @@ class App(ctk.CTk):
                 profile_post_days=profile_post_days,
                 reel_required_count=reel_required_count,
                 reel_max_days=reel_max_days,
-                target_to_open=profile_save_target,
+                target_to_open=reel_download_target,
                 parallel_tabs=parallel_tabs,
                 wait_seconds=wait_seconds,
                 port=port,
