@@ -44,6 +44,7 @@ ASSETS_DIR = APP_DIR / "assets"
 SESSIONS_BASE_DIR = Path(r"C:\Temp\instagram_reels_validator")
 CONFIG_PATH = ASSETS_DIR / "instagram_reels_gui_v19_config.json"
 ICON_PATH = ASSETS_DIR / "Rminer.ico"
+VALIDATED_PROFILES_PATH = ASSETS_DIR / "perfis_validados.json"
 DOWNLOADS_BASE_DIR = APP_DIR / "\u2022 Reels"
 AUTO_CDP_PORT = 9222
 AUTO_WAIT_SECONDS = 35
@@ -214,6 +215,10 @@ class App(ctk.CTk):
         self.chrome_processes = {}
         self.stop_requested = False
         self.config = self.load_config()
+        self.validated_profiles_lock = threading.Lock()
+        self.validated_profiles = self.load_validated_profiles()
+        self._validated_profiles_save_job = None
+        self._validated_profiles_dirty = False
         self._autosave_job = None
         self.review_pages = []
 
@@ -478,9 +483,33 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             card,
-            text="perfis/abas",
+            text="abas",
             text_color="#d8c5ff",
         ).grid(row=4, column=1, padx=(108, 8), pady=4, sticky="w")
+
+        ctk.CTkLabel(
+            card,
+            text="Perfis simultâneos:",
+            text_color="#eadcff",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=4, column=2, padx=(14, 6), pady=4, sticky="w")
+
+        self.profile_parallel_entry = ctk.CTkEntry(
+            card,
+            width=90,
+            height=34,
+            fg_color="#170b2e",
+            border_color="#6d28d9",
+            text_color="#fbf7ff",
+        )
+        self.profile_parallel_entry.grid(row=4, column=3, padx=8, pady=4, sticky="w")
+        self.profile_parallel_entry.insert(0, str(self.config.get("max_parallel_profiles", "1")))
+
+        ctk.CTkLabel(
+            card,
+            text="perfis",
+            text_color="#d8c5ff",
+        ).grid(row=4, column=3, padx=(108, 8), pady=4, sticky="w")
 
         # ── Validação dos Reels dentro do perfil ───────────────────────────
         ctk.CTkFrame(card, fg_color="#6d28d9", height=1, corner_radius=0).grid(
@@ -569,6 +598,32 @@ class App(ctk.CTk):
             hover_color="#8b35f6",
             command=self.browse_download_dir,
         ).grid(row=8, column=4, padx=(6, 14), pady=(0, 12), sticky="e")
+
+        ctk.CTkLabel(
+            card,
+            text="Contas validadas:",
+            text_color="#eadcff",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=9, column=0, padx=14, pady=(0, 12), sticky="w")
+
+        self.validated_profiles_label = ctk.CTkLabel(
+            card,
+            text="",
+            text_color="#d8c5ff",
+            font=ctk.CTkFont(size=13),
+            anchor="w",
+        )
+        self.validated_profiles_label.grid(row=9, column=1, columnspan=3, padx=8, pady=(0, 12), sticky="ew")
+
+        ctk.CTkButton(
+            card,
+            text="Limpar",
+            height=34,
+            width=110,
+            fg_color="#8f1d5c",
+            hover_color="#b12a75",
+            command=self.clear_validated_profiles,
+        ).grid(row=9, column=4, padx=(6, 14), pady=(0, 12), sticky="e")
 
         list_card = ctk.CTkFrame(main, fg_color="#24113f", corner_radius=10)
         list_card.grid(row=4, column=0, padx=20, pady=(18, 0), sticky="ew")
@@ -688,6 +743,7 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=13),
         )
         self.info_label.grid(row=0, column=0, padx=12, pady=4, sticky="w")
+        self.update_validated_profiles_label()
 
         self.log_box = ctk.CTkTextbox(
             log_panel,
@@ -723,6 +779,154 @@ class App(ctk.CTk):
             pass
 
         return {}
+
+    def load_validated_profiles(self) -> dict:
+        try:
+            if not VALIDATED_PROFILES_PATH.exists():
+                return {}
+            with VALIDATED_PROFILES_PATH.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("profiles"), dict):
+                raw_profiles = data.get("profiles") or {}
+            elif isinstance(data, dict):
+                raw_profiles = data
+            elif isinstance(data, list):
+                raw_profiles = {str(item): {"username": str(item)} for item in data}
+            else:
+                raw_profiles = {}
+
+            profiles = {}
+            for key, item in raw_profiles.items():
+                if isinstance(item, dict):
+                    username = self.normalize_instagram_profile(item.get("username") or key)
+                    record = dict(item)
+                else:
+                    username = self.normalize_instagram_profile(str(item or key))
+                    record = {"username": username}
+                if not username:
+                    continue
+                record["username"] = username
+                record.setdefault("first_validated_at", record.get("last_validated_at", ""))
+                record.setdefault("last_validated_at", record.get("first_validated_at", ""))
+                record["count"] = int(record.get("count") or 1)
+                profiles[username.lower()] = record
+            return profiles
+        except Exception:
+            return {}
+
+    def save_validated_profiles(self) -> None:
+        try:
+            with self.validated_profiles_lock:
+                profiles_snapshot = dict(self.validated_profiles)
+            ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+            with VALIDATED_PROFILES_PATH.open("w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "profiles": profiles_snapshot,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            self._validated_profiles_dirty = False
+        except Exception as e:
+            self.log(f"Não consegui salvar lista de contas validadas: {e}")
+
+    def schedule_validated_profiles_save(self, delay_ms: int = 1200) -> None:
+        self._validated_profiles_dirty = True
+        if self._validated_profiles_save_job:
+            return
+
+        def flush():
+            self._validated_profiles_save_job = None
+            if self._validated_profiles_dirty:
+                self.save_validated_profiles()
+
+        try:
+            self._validated_profiles_save_job = self.after(delay_ms, flush)
+        except Exception:
+            self.save_validated_profiles()
+
+    def validated_profiles_summary(self) -> str:
+        with self.validated_profiles_lock:
+            records = list(self.validated_profiles.values())
+        if not records:
+            return "Nenhuma conta salva."
+
+        latest_dt = None
+        for record in records:
+            raw = str(record.get("last_validated_at") or record.get("first_validated_at") or "")
+            try:
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if latest_dt is None or dt > latest_dt:
+                latest_dt = dt
+
+        if latest_dt is None:
+            return f"{len(records)} conta(s) salva(s). Último: sem data."
+
+        now = datetime.now(timezone.utc)
+        days = max(0, int((now - latest_dt).total_seconds() // 86400))
+        return f"{len(records)} conta(s) salva(s). Último perfil validado há {days} dia(s)."
+
+    def update_validated_profiles_label(self) -> None:
+        if not hasattr(self, "validated_profiles_label"):
+            return
+
+        def apply():
+            self.validated_profiles_label.configure(text=self.validated_profiles_summary())
+
+        try:
+            self.after(0, apply)
+        except Exception:
+            apply()
+
+    def clear_validated_profiles(self) -> None:
+        if not messagebox.askyesno("Contas validadas", "Limpar toda a lista de contas já validadas?"):
+            return
+        with self.validated_profiles_lock:
+            self.validated_profiles = {}
+        self.save_validated_profiles()
+        self.update_validated_profiles_label()
+        self.log("Lista de contas validadas foi limpa.")
+
+    def is_profile_already_validated(self, owner: str) -> bool:
+        owner = self.normalize_instagram_profile(owner)
+        if not owner:
+            return False
+        with self.validated_profiles_lock:
+            return owner.lower() in self.validated_profiles
+
+    def mark_profile_validated(
+        self,
+        owner: str,
+        shortcode: str = "",
+        source_profile: str = "",
+        likes_count: int = 0,
+        matches: int = 0,
+        status: str = "validado",
+    ) -> None:
+        owner = self.normalize_instagram_profile(owner)
+        if not owner:
+            return
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        key = owner.lower()
+        with self.validated_profiles_lock:
+            record = dict(self.validated_profiles.get(key) or {})
+            record.setdefault("first_validated_at", now)
+            record["last_validated_at"] = now
+            record["username"] = owner
+            record["count"] = int(record.get("count") or 0) + 1
+            record["last_reel_shortcode"] = str(shortcode or "")
+            record["last_source_profile"] = str(source_profile or "")
+            record["last_likes"] = int(likes_count or 0)
+            record["last_keyword_matches"] = int(matches or 0)
+            record["status"] = str(status or "validado")
+            self.validated_profiles[key] = record
+        self.schedule_validated_profiles_save()
+        self.update_validated_profiles_label()
 
     def get_downloads_dir(self) -> Path:
         raw = ""
@@ -1011,6 +1215,14 @@ class App(ctk.CTk):
             return profiles[:limit]
         return profiles
 
+    def get_max_parallel_profiles_setting(self) -> int:
+        try:
+            raw = self.profile_parallel_entry.get().strip() if hasattr(self, "profile_parallel_entry") else ""
+            value = int(raw or "1")
+        except Exception:
+            value = 1
+        return max(1, value)
+
     def open_selected_profile(self):
         self.save_selected_profile()
         profile = self.selected_profile()
@@ -1021,7 +1233,7 @@ class App(ctk.CTk):
 
     def open_active_profiles(self):
         self.save_selected_profile()
-        profiles = self.active_profiles()
+        profiles = self.active_profiles(limit=self.get_max_parallel_profiles_setting())
         if not profiles:
             messagebox.showwarning("Perfis Rminer", "Marque pelo menos um perfil como ativo.")
             return
@@ -1072,6 +1284,7 @@ class App(ctk.CTk):
                 self.recent_hours_entry,
                 self.profile_save_target_entry,
                 self.parallel_tabs_entry,
+                self.profile_parallel_entry,
                 self.download_target_entry,
                 self.reel_hours_entry,
                 self.download_dir_entry,
@@ -1107,6 +1320,7 @@ class App(ctk.CTk):
                 "profile_post_recent_days": self.recent_hours_entry.get().strip() if hasattr(self, "recent_hours_entry") else "1",
                 "reel_download_target": self.profile_save_target_entry.get().strip() if hasattr(self, "profile_save_target_entry") else "5",
                 "parallel_tabs": self.parallel_tabs_entry.get().strip() if hasattr(self, "parallel_tabs_entry") else "4",
+                "max_parallel_profiles": self.profile_parallel_entry.get().strip() if hasattr(self, "profile_parallel_entry") else "1",
                 "reel_required_count": self.download_target_entry.get().strip() if hasattr(self, "download_target_entry") else "1",
                 "reel_recent_days": self.reel_hours_entry.get().strip() if hasattr(self, "reel_hours_entry") else "1",
                 "download_dir": self.download_dir_entry.get().strip() if hasattr(self, "download_dir_entry") else str(DOWNLOADS_BASE_DIR),
@@ -1272,6 +1486,8 @@ class App(ctk.CTk):
 
     def on_close(self):
         self.save_config()
+        if self._validated_profiles_dirty:
+            self.save_validated_profiles()
         self.destroy()
 
     def parse_int_entry(self, entry, default: int, minimum: int = 1) -> int:
@@ -2601,6 +2817,14 @@ class App(ctk.CTk):
                 total = len(discovered_profiles)
                 if total >= max_profiles:
                     target_reached_event.set()
+            self.mark_profile_validated(
+                owner,
+                shortcode=shortcode,
+                source_profile=profile.name,
+                likes_count=likes_count,
+                matches=matches,
+                status="aprovado_fy",
+            )
             self.log(
                 f"Aba {tab_index}: perfil aprovado pela FY: @{owner} | "
                 f"Reel {shortcode} | likes={likes_count} | comentarios-chave={matches} | {total}/{max_profiles}"
@@ -2649,6 +2873,23 @@ class App(ctk.CTk):
                                 advance_fy_page(page, tab_index, steps=duplicate_stride, reason="shortcode repetido")
                                 continue
 
+                        owner_marked_current = False
+                        owner = self.get_current_reel_owner(page, tab_index=tab_index)
+                        if not owner and shortcode:
+                            owner = self.get_reel_owner_ytdlp(shortcode, tab_index=tab_index)
+                        if owner and self.is_profile_already_validated(owner):
+                            self.log(f"Aba {tab_index}: @{owner} ja foi validado antes. Pulando Reel da FY.")
+                            advance_fy_page(page, tab_index, reason="perfil ja validado")
+                            continue
+                        if owner:
+                            self.mark_profile_validated(
+                                owner,
+                                shortcode=shortcode,
+                                source_profile=profile.name,
+                                status="visto_fy",
+                            )
+                            owner_marked_current = True
+
                         like_info = self.get_current_reel_like_count(page, tab_index=tab_index)
                         if not like_info.get("ok"):
                             self.log(f"Aba {tab_index}: nao li likes: {like_info.get('reason')}. Pulando.")
@@ -2688,7 +2929,8 @@ class App(ctk.CTk):
                             f"idade {profile_age_days:.2f} dia(s)"
                         )
 
-                        owner = self.get_current_reel_owner(page, tab_index=tab_index)
+                        if not owner:
+                            owner = self.get_current_reel_owner(page, tab_index=tab_index)
                         keyword_result = self.count_keyword_comments(
                             page=page,
                             keywords=keywords,
@@ -2717,6 +2959,20 @@ class App(ctk.CTk):
                             owner = self.get_reel_owner_ytdlp(shortcode, tab_index=tab_index)
                         if not should_continue():
                             break
+                        if owner and not owner_marked_current:
+                            if self.is_profile_already_validated(owner):
+                                self.log(f"Aba {tab_index}: @{owner} ja foi validado antes. Pulando Reel da FY.")
+                                advance_fy_page(page, tab_index, reason="perfil ja validado")
+                                continue
+                            self.mark_profile_validated(
+                                owner,
+                                shortcode=shortcode,
+                                source_profile=profile.name,
+                                likes_count=likes_count,
+                                matches=matches,
+                                status="visto_fy",
+                            )
+                            owner_marked_current = True
 
                         if add_profile(owner, shortcode, tab_index, likes_count, matches):
                             try:
@@ -3083,6 +3339,7 @@ class App(ctk.CTk):
 
             parallel_tabs = self.parse_int_entry(self.parallel_tabs_entry, default=4, minimum=1)
             parallel_tabs = max(1, min(8, parallel_tabs))
+            max_parallel_profiles = self.get_max_parallel_profiles_setting()
             wait_seconds = self.get_wait_seconds()
 
             self.save_selected_profile()
@@ -3093,7 +3350,7 @@ class App(ctk.CTk):
                 self.set_result("SEM PALAVRAS", "#ff5f5f")
                 return
 
-            profiles = self.active_profiles(limit=min(parallel_tabs, reel_download_target))
+            profiles = self.active_profiles(limit=min(max_parallel_profiles, reel_download_target))
             if not profiles:
                 self.log("Marque pelo menos um perfil Rminer como ativo.")
                 self.set_result("SEM PERFIL", "#ff5f5f")
@@ -3108,7 +3365,10 @@ class App(ctk.CTk):
             workers_per_profile = max(1, parallel_tabs // max(1, len(profiles)))
 
             self.log(f"Meta de reels para baixar: {reel_download_target}.")
-            self.log(f"Perfis ativos em uso: {len(profiles)} | workers por perfil: {workers_per_profile}.")
+            self.log(
+                f"Perfis simultâneos em uso: {len(profiles)}/{max_parallel_profiles} | "
+                f"abas por perfil: {workers_per_profile}."
+            )
             for profile, quota in zip(profiles, quotas):
                 self.log(f"- {profile.name} | porta {profile.port} | meta {quota} Reel(s)")
             self.log(

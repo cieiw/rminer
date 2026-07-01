@@ -1,0 +1,38 @@
+{
+  "updated_at": "2026-07-01T00:15:21.409429Z",
+  "profiles": {
+    "bealauannyy": {
+      "first_validated_at": "2026-07-01T00:15:04.939348Z",
+      "last_validated_at": "2026-07-01T00:15:04.939348Z",
+      "username": "bealauannyy",
+      "count": 1,
+      "last_reel_shortcode": "DaGBBzAOg3M",
+      "last_source_profile": "2",
+      "last_likes": 0,
+      "last_keyword_matches": 0,
+      "status": "visto_fy"
+    },
+    "sarinhaa.silvia": {
+      "first_validated_at": "2026-07-01T00:15:06.409330Z",
+      "last_validated_at": "2026-07-01T00:15:10.893997Z",
+      "username": "sarinhaa.silvia",
+      "count": 2,
+      "last_reel_shortcode": "DaNRrBUxZ1l",
+      "last_source_profile": "1",
+      "last_likes": 149,
+      "last_keyword_matches": 2,
+      "status": "aprovado_fy"
+    },
+    "aamanda.limaz": {
+      "first_validated_at": "2026-07-01T00:15:15.989375Z",
+      "last_validated_at": "2026-07-01T00:15:20.194517Z",
+      "username": "aamanda.limaz",
+      "count": 2,
+      "last_reel_shortcode": "DaD5QsdRboT",
+      "last_source_profile": "2",
+      "last_likes": 4167,
+      "last_keyword_matches": 2,
+      "status": "aprovado_fy"
+    }
+  }
+}
