@@ -21,10 +21,11 @@ import threading
 import time
 import traceback
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from tkinter import filedialog, messagebox
 from typing import List, Optional
 
 import customtkinter as ctk
@@ -39,9 +40,11 @@ except ImportError:
 
 INSTAGRAM_REELS_URL = "https://www.instagram.com/reels/"
 APP_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+ASSETS_DIR = APP_DIR / "assets"
 SESSIONS_BASE_DIR = Path(r"C:\Temp\instagram_reels_validator")
-CONFIG_PATH = APP_DIR / "instagram_reels_gui_v19_config.json"
-DOWNLOADS_BASE_DIR = APP_DIR / "reels_aprovados"
+CONFIG_PATH = ASSETS_DIR / "instagram_reels_gui_v19_config.json"
+ICON_PATH = ASSETS_DIR / "Rminer.ico"
+DOWNLOADS_BASE_DIR = APP_DIR / "\u2022 Reels"
 AUTO_CDP_PORT = 9222
 AUTO_WAIT_SECONDS = 35
 
@@ -49,55 +52,28 @@ AUTO_WAIT_SECONDS = 35
 # yt-dlp para autenticar downloads. Exporte com uma extensão tipo
 # "Get cookies.txt LOCALLY" depois de logar no Instagram, e salve/atualize
 # este arquivo periodicamente (a sessão expira de tempos em tempos).
-COOKIES_TXT_PATH = APP_DIR / "cookies.txt"
-AUTO_COOKIES_TXT_PATH = APP_DIR / "cookies_ytdlp_auto.txt"
+COOKIES_TXT_PATH = ASSETS_DIR / "cookies.txt"
+AUTO_COOKIES_TXT_PATH = ASSETS_DIR / "cookies_ytdlp_auto.txt"
 
 
 @dataclass
 class ChromeProfile:
+    id: str
     name: str
-    profile_dir: str
-    email: str = ""
+    port: str
+    session: str
+    active: bool = True
 
     @property
     def label(self) -> str:
-        if self.email:
-            return f"{self.name}  —  {self.email}  [{self.profile_dir}]"
-        return f"{self.name}  [{self.profile_dir}]"
+        status = "ativo" if self.active else "inativo"
+        return f"{self.name}  |  porta {self.port}  |  {status}"
 
     @property
     def safe_session_name(self) -> str:
-        raw = f"{self.name}_{self.email}_{self.profile_dir}".strip("_")
+        raw = f"{self.id}_{self.name}_{self.port}".strip("_")
         raw = re.sub(r"[^a-zA-Z0-9._@-]+", "_", raw)
-        return raw[:120] or self.profile_dir
-
-
-def get_default_chrome_user_data_dir() -> Path:
-    if sys.platform.startswith("win"):
-        return Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
-    return Path.home() / ".config" / "google-chrome"
-
-
-def load_chrome_profiles(user_data_dir: Path) -> List[ChromeProfile]:
-    local_state = user_data_dir / "Local State"
-    if not local_state.exists():
-        return []
-
-    with local_state.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    info_cache = data.get("profile", {}).get("info_cache", {})
-    profiles: List[ChromeProfile] = []
-
-    for profile_dir, profile_info in info_cache.items():
-        name = profile_info.get("name") or profile_dir
-        email = profile_info.get("user_name") or profile_info.get("gaia_name") or ""
-        profiles.append(ChromeProfile(name=name, profile_dir=profile_dir, email=email))
-
-    profiles.sort(key=lambda p: (p.profile_dir != "Default", p.name.lower(), p.profile_dir.lower()))
-    return profiles
+        return raw[:120] or self.id
 
 
 def find_chrome_exe() -> Optional[str]:
@@ -205,9 +181,13 @@ def enable_dark_title_bar(window) -> None:
         window.update()
         hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
         value = ctypes.c_int(1)
+        black = ctypes.c_int(0x000000)
+        white = ctypes.c_int(0xFFFFFF)
 
         ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), ctypes.sizeof(value))
         ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(value), ctypes.sizeof(value))
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(black), ctypes.sizeof(black))
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(white), ctypes.sizeof(white))
     except Exception:
         pass
 
@@ -219,14 +199,19 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("dark-blue")
 
-        self.title("Rminer - Fluxo por perfil")
+        self.title("Rminer")
+        if ICON_PATH.exists():
+            try:
+                self.iconbitmap(str(ICON_PATH))
+            except Exception:
+                pass
         self.geometry("1280x1000")
         self.minsize(1280, 850)
-        self.configure(fg_color="#0b0f14")
+        self.configure(fg_color="#170b2e")
 
-        self.user_data_dir = get_default_chrome_user_data_dir()
         self.profiles: List[ChromeProfile] = []
         self.chrome_process: Optional[subprocess.Popen] = None
+        self.chrome_processes = {}
         self.stop_requested = False
         self.config = self.load_config()
         self._autosave_job = None
@@ -254,14 +239,14 @@ class App(ctk.CTk):
 
         self.main_scroll = ctk.CTkScrollableFrame(
             self,
-            fg_color="#0b0f14",
+            fg_color="#170b2e",
             corner_radius=0,
-            scrollbar_button_color="#263243",
-            scrollbar_button_hover_color="#34445a",
+            scrollbar_button_color="#6d28d9",
+            scrollbar_button_hover_color="#8b35f6",
         )
         self.main_scroll.grid(row=0, column=0, sticky="nsew")
 
-        log_panel = ctk.CTkFrame(self, fg_color="#0b0f14", corner_radius=0, width=430)
+        log_panel = ctk.CTkFrame(self, fg_color="#170b2e", corner_radius=0, width=430)
         log_panel.grid(row=0, column=1, sticky="nsew")
         log_panel.grid_propagate(False)
         log_panel.grid_columnconfigure(0, weight=1)
@@ -274,139 +259,194 @@ class App(ctk.CTk):
             main,
             text="Rminer - Fluxo por perfil",
             font=ctk.CTkFont(size=25, weight="bold"),
-            text_color="#f5f7fb",
-        ).grid(row=0, column=0, padx=24, pady=(24, 6), sticky="w")
+            text_color="#fbf7ff",
+        ).grid(row=0, column=0, padx=20, pady=(14, 4), sticky="w")
 
         ctk.CTkLabel(
             main,
             text="Descobre perfis na FY, valida os Reels dentro do perfil e baixa automaticamente os aprovados.",
             font=ctk.CTkFont(size=14),
-            text_color="#9aa4b2",
-        ).grid(row=1, column=0, padx=24, pady=(0, 18), sticky="w")
+            text_color="#d8c5ff",
+        ).grid(row=1, column=0, padx=20, pady=(0, 12), sticky="w")
 
-        card = ctk.CTkFrame(main, fg_color="#121821", corner_radius=16)
-        card.grid(row=2, column=0, padx=24, pady=0, sticky="ew")
-        card.grid_columnconfigure(1, weight=1)
-        card.grid_columnconfigure(3, weight=1)
+        profile_card = ctk.CTkFrame(main, fg_color="#24113f", corner_radius=10)
+        profile_card.grid(row=2, column=0, padx=20, pady=0, sticky="ew")
+        profile_card.grid_columnconfigure(1, weight=1)
+        profile_card.grid_columnconfigure(3, weight=0)
 
         ctk.CTkLabel(
-            card,
-            text="Perfil / sessão:",
-            text_color="#cfd7e3",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, padx=18, pady=(20, 10), sticky="w")
+            profile_card,
+            text="Perfis Rminer",
+            text_color="#fbf7ff",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, padx=14, pady=(12, 6), sticky="w")
 
         self.profile_var = ctk.StringVar()
         self.profile_combo = ctk.CTkComboBox(
-            card,
+            profile_card,
             variable=self.profile_var,
             values=[],
-            height=42,
-            fg_color="#0b0f14",
-            button_color="#263243",
-            button_hover_color="#34445a",
-            border_color="#263243",
-            dropdown_fg_color="#121821",
-            dropdown_hover_color="#263243",
-            text_color="#f5f7fb",
-            dropdown_text_color="#f5f7fb",
+            height=34,
+            fg_color="#120820",
+            button_color="#6d28d9",
+            button_hover_color="#8b35f6",
+            border_color="#6d28d9",
+            dropdown_fg_color="#24113f",
+            dropdown_hover_color="#6d28d9",
+            text_color="#fbf7ff",
+            dropdown_text_color="#fbf7ff",
+            command=lambda _value=None: self.profile_selected(),
         )
-        self.profile_combo.grid(row=0, column=1, columnspan=3, padx=(8, 18), pady=(20, 10), sticky="ew")
+        self.profile_combo.grid_forget()
 
+        self.profile_active_var = ctk.BooleanVar(value=True)
+        self.profile_active_check = ctk.CTkCheckBox(
+            profile_card,
+            text="Ativo",
+            variable=self.profile_active_var,
+            text_color="#eadcff",
+            fg_color="#6d28d9",
+            hover_color="#8b35f6",
+            border_color="#6d28d9",
+            command=self.save_selected_profile,
+        )
+        self.profile_active_check.grid(row=0, column=4, padx=(0, 14), pady=(12, 6), sticky="e")
+
+        ctk.CTkLabel(profile_card, text="Nome:", text_color="#eadcff").grid(row=1, column=0, padx=14, pady=4, sticky="w")
+        self.profile_name_entry = ctk.CTkEntry(profile_card, height=32, fg_color="#170b2e", border_color="#6d28d9", text_color="#fbf7ff")
+        self.profile_name_entry.grid(row=1, column=1, padx=(6, 14), pady=4, sticky="ew")
+
+        ctk.CTkLabel(profile_card, text="Porta:", text_color="#eadcff").grid(row=1, column=2, padx=(0, 8), pady=4, sticky="e")
+        self.profile_port_entry = ctk.CTkEntry(profile_card, width=90, height=32, fg_color="#170b2e", border_color="#6d28d9", text_color="#fbf7ff")
+        self.profile_port_entry.grid(row=1, column=3, padx=(0, 14), pady=4, sticky="w")
+
+        ctk.CTkLabel(profile_card, text="Sessão:", text_color="#eadcff").grid(row=2, column=0, padx=14, pady=4, sticky="w")
+        self.profile_session_entry = ctk.CTkEntry(profile_card, height=32, fg_color="#170b2e", border_color="#6d28d9", text_color="#fbf7ff")
+        self.profile_session_entry.grid(row=2, column=1, columnspan=3, padx=(6, 14), pady=4, sticky="ew")
         ctk.CTkButton(
-            card,
-            text="Atualizar",
-            height=40,
-            width=110,
-            fg_color="#263243",
-            hover_color="#34445a",
-            command=self.refresh_profiles,
-        ).grid(row=0, column=4, padx=(0, 18), pady=(20, 10))
+            profile_card,
+            text="Pasta",
+            width=86,
+            height=32,
+            fg_color="#6d28d9",
+            hover_color="#8b35f6",
+            command=self.browse_profile_session_dir,
+        ).grid(row=2, column=4, padx=(0, 14), pady=4, sticky="e")
+
+        profile_buttons = ctk.CTkFrame(profile_card, fg_color="#24113f")
+        profile_buttons.grid(row=3, column=0, columnspan=5, padx=14, pady=(8, 16), sticky="ew")
+        for txt, cmd, width in [
+            ("Novo", self.new_profile, 80),
+            ("Salvar", self.save_selected_profile, 90),
+            ("Excluir", self.delete_selected_profile, 90),
+            ("Abrir sel.", self.open_selected_profile, 110),
+            ("Abrir ativos", self.open_active_profiles, 120),
+        ]:
+            ctk.CTkButton(
+                profile_buttons,
+                text=txt,
+                width=width,
+                height=32,
+                fg_color="#6d28d9",
+                hover_color="#8b35f6",
+                command=cmd,
+            ).pack(side="left", padx=(0, 8))
+
+        self._profiles_list_frame = ctk.CTkFrame(profile_card, fg_color="#170b2e", corner_radius=8)
+        self._profiles_list_frame.grid(row=4, column=0, columnspan=5, padx=14, pady=(0, 12), sticky="ew")
+        self._profiles_list_frame.grid_columnconfigure(0, weight=1)
+        self._profile_check_vars = {}
+        self._profile_row_frames = {}
+
+        card = ctk.CTkFrame(main, fg_color="#24113f", corner_radius=10)
+        card.grid(row=3, column=0, padx=20, pady=(18, 0), sticky="ew")
+        card.grid_columnconfigure(1, weight=1)
+        card.grid_columnconfigure(3, weight=1)
 
         # ── Validação do perfil encontrado na FY ──────────────────────────────
         ctk.CTkLabel(
             card,
             text="VALIDAÇÃO DO PERFIL ENCONTRADO NA FY",
-            text_color="#f5f7fb",
+            text_color="#fbf7ff",
             font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=1, column=0, columnspan=5, padx=18, pady=(14, 4), sticky="w")
+        ).grid(row=1, column=0, columnspan=5, padx=14, pady=(10, 3), sticky="w")
 
         ctk.CTkLabel(
             card,
             text="Likes mínimos:",
-            text_color="#cfd7e3",
+            text_color="#eadcff",
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=2, column=0, padx=18, pady=10, sticky="w")
+        ).grid(row=2, column=0, padx=14, pady=4, sticky="w")
 
         self.min_likes_entry = ctk.CTkEntry(
             card,
             width=90,
-            height=38,
-            fg_color="#0b0f14",
-            border_color="#263243",
-            text_color="#f5f7fb",
+            height=34,
+            fg_color="#170b2e",
+            border_color="#6d28d9",
+            text_color="#fbf7ff",
         )
-        self.min_likes_entry.grid(row=2, column=1, padx=8, pady=10, sticky="w")
+        self.min_likes_entry.grid(row=2, column=1, padx=8, pady=4, sticky="w")
         self.min_likes_entry.insert(0, str(self.config.get("min_likes", "1000")))
 
         ctk.CTkLabel(
             card,
             text="Comentários-chave mínimos:",
-            text_color="#cfd7e3",
+            text_color="#eadcff",
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=2, column=2, padx=(18, 8), pady=10, sticky="w")
+        ).grid(row=2, column=2, padx=(14, 6), pady=4, sticky="w")
 
         self.required_entry = ctk.CTkEntry(
             card,
             width=90,
-            height=38,
-            fg_color="#0b0f14",
-            border_color="#263243",
-            text_color="#f5f7fb",
+            height=34,
+            fg_color="#170b2e",
+            border_color="#6d28d9",
+            text_color="#fbf7ff",
         )
-        self.required_entry.grid(row=2, column=3, padx=8, pady=10, sticky="w")
+        self.required_entry.grid(row=2, column=3, padx=8, pady=4, sticky="w")
         self.required_entry.insert(0, str(self.config.get("profile_keyword_required_count", self.config.get("required_count", "1"))))
 
         ctk.CTkLabel(
             card,
             text="Postado até:",
-            text_color="#cfd7e3",
+            text_color="#eadcff",
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=3, column=0, padx=18, pady=10, sticky="w")
+        ).grid(row=3, column=0, padx=14, pady=4, sticky="w")
 
         self.recent_hours_entry = ctk.CTkEntry(
             card,
             width=90,
-            height=38,
-            fg_color="#0b0f14",
-            border_color="#263243",
-            text_color="#f5f7fb",
+            height=34,
+            fg_color="#170b2e",
+            border_color="#6d28d9",
+            text_color="#fbf7ff",
         )
-        self.recent_hours_entry.grid(row=3, column=1, padx=8, pady=10, sticky="w")
+        self.recent_hours_entry.grid(row=3, column=1, padx=8, pady=4, sticky="w")
         self.recent_hours_entry.insert(0, str(self.config.get("profile_post_recent_days", self.config.get("comment_recent_days", "1"))))
 
         ctk.CTkLabel(
             card,
             text="dias",
-            text_color="#9aa4b2",
-        ).grid(row=3, column=1, padx=(108, 8), pady=10, sticky="w")
+            text_color="#d8c5ff",
+        ).grid(row=3, column=1, padx=(108, 8), pady=4, sticky="w")
 
         ctk.CTkLabel(
             card,
             text="Quantidade de reels:",
-            text_color="#cfd7e3",
+            text_color="#eadcff",
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=3, column=2, padx=(18, 8), pady=10, sticky="w")
+        ).grid(row=3, column=2, padx=(14, 6), pady=4, sticky="w")
 
         self.profile_save_target_entry = ctk.CTkEntry(
             card,
             width=90,
-            height=38,
-            fg_color="#0b0f14",
-            border_color="#263243",
-            text_color="#f5f7fb",
+            height=34,
+            fg_color="#170b2e",
+            border_color="#6d28d9",
+            text_color="#fbf7ff",
         )
-        self.profile_save_target_entry.grid(row=3, column=3, padx=8, pady=10, sticky="w")
+        self.profile_save_target_entry.grid(row=3, column=3, padx=8, pady=4, sticky="w")
         self.profile_save_target_entry.insert(
             0,
             str(self.config.get("reel_download_target", self.config.get("profile_save_target", self.config.get("download_target", "5")))),
@@ -415,173 +455,204 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             card,
             text="reels",
-            text_color="#9aa4b2",
-        ).grid(row=3, column=3, padx=(108, 8), pady=10, sticky="w")
+            text_color="#d8c5ff",
+        ).grid(row=3, column=3, padx=(108, 8), pady=4, sticky="w")
 
         ctk.CTkLabel(
             card,
             text="Abas simultâneas:",
-            text_color="#cfd7e3",
+            text_color="#eadcff",
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=4, column=0, padx=18, pady=10, sticky="w")
+        ).grid(row=4, column=0, padx=14, pady=4, sticky="w")
 
         self.parallel_tabs_entry = ctk.CTkEntry(
             card,
             width=90,
-            height=38,
-            fg_color="#0b0f14",
-            border_color="#263243",
-            text_color="#f5f7fb",
+            height=34,
+            fg_color="#170b2e",
+            border_color="#6d28d9",
+            text_color="#fbf7ff",
         )
-        self.parallel_tabs_entry.grid(row=4, column=1, padx=8, pady=10, sticky="w")
+        self.parallel_tabs_entry.grid(row=4, column=1, padx=8, pady=4, sticky="w")
         self.parallel_tabs_entry.insert(0, str(self.config.get("parallel_tabs", "4")))
 
         ctk.CTkLabel(
             card,
-            text="workers",
-            text_color="#9aa4b2",
-        ).grid(row=4, column=1, padx=(108, 8), pady=10, sticky="w")
+            text="perfis/abas",
+            text_color="#d8c5ff",
+        ).grid(row=4, column=1, padx=(108, 8), pady=4, sticky="w")
 
         # ── Validação dos Reels dentro do perfil ───────────────────────────
+        ctk.CTkFrame(card, fg_color="#6d28d9", height=1, corner_radius=0).grid(
+            row=5, column=0, columnspan=5, padx=14, pady=(10, 2), sticky="ew"
+        )
+
         ctk.CTkLabel(
             card,
             text="VALIDAÇÃO DOS REELS DENTRO DO PERFIL",
-            text_color="#f5f7fb",
+            text_color="#fbf7ff",
             font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=5, column=0, columnspan=5, padx=18, pady=(18, 4), sticky="w")
+        ).grid(row=6, column=0, columnspan=5, padx=14, pady=(10, 4), sticky="w")
 
         ctk.CTkLabel(
             card,
             text="Comentários mínimos:",
-            text_color="#cfd7e3",
+            text_color="#eadcff",
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=6, column=0, padx=18, pady=(10, 20), sticky="w")
+        ).grid(row=7, column=0, padx=14, pady=(4, 10), sticky="w")
 
         self.download_target_entry = ctk.CTkEntry(
             card,
             width=90,
-            height=38,
-            fg_color="#0b0f14",
-            border_color="#263243",
-            text_color="#f5f7fb",
+            height=34,
+            fg_color="#170b2e",
+            border_color="#6d28d9",
+            text_color="#fbf7ff",
         )
-        self.download_target_entry.grid(row=6, column=1, padx=8, pady=(10, 20), sticky="w")
+        self.download_target_entry.grid(row=7, column=1, padx=8, pady=(4, 10), sticky="w")
         self.download_target_entry.insert(0, str(self.config.get("reel_required_count", self.config.get("required_count", "1"))))
         self.reel_required_entry = self.download_target_entry
 
         ctk.CTkLabel(
             card,
             text="comentários",
-            text_color="#9aa4b2",
-        ).grid(row=6, column=1, padx=(108, 8), pady=(10, 20), sticky="w")
+            text_color="#d8c5ff",
+        ).grid(row=7, column=1, padx=(108, 8), pady=(4, 10), sticky="w")
 
         ctk.CTkLabel(
             card,
             text="Postado até:",
-            text_color="#cfd7e3",
+            text_color="#eadcff",
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=6, column=2, padx=(18, 8), pady=(10, 20), sticky="w")
+        ).grid(row=7, column=2, padx=(14, 6), pady=(4, 10), sticky="w")
 
         self.reel_hours_entry = ctk.CTkEntry(
             card,
             width=90,
-            height=38,
-            fg_color="#0b0f14",
-            border_color="#263243",
-            text_color="#f5f7fb",
+            height=34,
+            fg_color="#170b2e",
+            border_color="#6d28d9",
+            text_color="#fbf7ff",
         )
-        self.reel_hours_entry.grid(row=6, column=3, padx=8, pady=(10, 20), sticky="w")
+        self.reel_hours_entry.grid(row=7, column=3, padx=8, pady=(4, 10), sticky="w")
         self.reel_hours_entry.insert(0, str(self.config.get("reel_recent_days", "1")))
 
         ctk.CTkLabel(
             card,
             text="dias",
-            text_color="#9aa4b2",
-        ).grid(row=6, column=3, padx=(108, 8), pady=(10, 20), sticky="w")
+            text_color="#d8c5ff",
+        ).grid(row=7, column=3, padx=(108, 8), pady=(4, 10), sticky="w")
 
-        list_card = ctk.CTkFrame(main, fg_color="#121821", corner_radius=14)
-        list_card.grid(row=3, column=0, padx=24, pady=(16, 0), sticky="ew")
+        ctk.CTkLabel(
+            card,
+            text="Salvar Reels em:",
+            text_color="#eadcff",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=8, column=0, padx=14, pady=(0, 12), sticky="w")
+
+        self.download_dir_entry = ctk.CTkEntry(
+            card,
+            height=34,
+            fg_color="#170b2e",
+            border_color="#6d28d9",
+            text_color="#fbf7ff",
+        )
+        self.download_dir_entry.grid(row=8, column=1, columnspan=3, padx=8, pady=(0, 12), sticky="ew")
+        self.download_dir_entry.insert(0, str(self.config.get("download_dir", str(DOWNLOADS_BASE_DIR))))
+
+        ctk.CTkButton(
+            card,
+            text="Pasta",
+            height=34,
+            width=110,
+            fg_color="#6d28d9",
+            hover_color="#8b35f6",
+            command=self.browse_download_dir,
+        ).grid(row=8, column=4, padx=(6, 14), pady=(0, 12), sticky="e")
+
+        list_card = ctk.CTkFrame(main, fg_color="#24113f", corner_radius=10)
+        list_card.grid(row=4, column=0, padx=20, pady=(18, 0), sticky="ew")
         list_card.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
             list_card,
             text="Palavras-chave nos comentarios",
-            text_color="#cfd7e3",
+            text_color="#eadcff",
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, padx=16, pady=(14, 6), sticky="w")
+        ).grid(row=0, column=0, padx=12, pady=(10, 4), sticky="w")
 
         self.profile_list_text = ctk.CTkTextbox(
             list_card,
             height=72,
-            fg_color="#0b0f14",
-            border_color="#263243",
+            fg_color="#170b2e",
+            border_color="#6d28d9",
             border_width=1,
-            text_color="#f5f7fb",
+            text_color="#fbf7ff",
             wrap="none",
         )
-        self.profile_list_text.grid(row=1, column=0, padx=16, pady=(0, 16), sticky="ew")
+        self.profile_list_text.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="ew")
         saved_profile_list = str(self.config.get("keyword_list", self.config.get("profile_list", "")) or "")
         if saved_profile_list:
             self.profile_list_text.insert("1.0", saved_profile_list)
 
-        selector_card = ctk.CTkFrame(main, fg_color="#121821", corner_radius=14)
-        selector_card.grid(row=4, column=0, padx=24, pady=(16, 0), sticky="ew")
+        selector_card = ctk.CTkFrame(main, fg_color="#24113f", corner_radius=10)
+        selector_card.grid(row=5, column=0, padx=20, pady=(18, 0), sticky="ew")
         selector_card.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(
             selector_card,
             text="PAINEL DE SELETORES FIXOS",
-            text_color="#f5f7fb",
+            text_color="#fbf7ff",
             font=ctk.CTkFont(size=14, weight="bold"),
-        ).grid(row=0, column=0, columnspan=3, padx=16, pady=(14, 4), sticky="w")
+        ).grid(row=0, column=0, columnspan=3, padx=12, pady=(10, 3), sticky="w")
 
         ctk.CTkLabel(
             selector_card,
             text="Contador de comentários da grade:",
-            text_color="#cfd7e3",
+            text_color="#eadcff",
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=1, column=0, padx=16, pady=(10, 6), sticky="w")
+        ).grid(row=1, column=0, padx=12, pady=(6, 4), sticky="w")
 
         self.grid_comment_selector_entry = ctk.CTkEntry(
             selector_card,
-            height=38,
-            fg_color="#0b0f14",
-            border_color="#263243",
-            text_color="#f5f7fb",
+            height=34,
+            fg_color="#170b2e",
+            border_color="#6d28d9",
+            text_color="#fbf7ff",
         )
-        self.grid_comment_selector_entry.grid(row=1, column=1, padx=8, pady=(10, 6), sticky="ew")
+        self.grid_comment_selector_entry.grid(row=1, column=1, padx=8, pady=(6, 4), sticky="ew")
         self.grid_comment_selector_entry.insert(0, str(self.config.get("grid_comment_count_selector", "")))
 
         ctk.CTkButton(
             selector_card,
             text="Capturar",
-            height=38,
+            height=34,
             width=110,
-            fg_color="#263243",
-            hover_color="#34445a",
+            fg_color="#6d28d9",
+            hover_color="#8b35f6",
             command=lambda: self.start_selector_capture("grid_comment_count_selector", self.grid_comment_selector_entry, "contador de comentários da grade"),
-        ).grid(row=1, column=2, padx=(8, 16), pady=(10, 6), sticky="e")
+        ).grid(row=1, column=2, padx=(6, 12), pady=(6, 4), sticky="e")
 
         ctk.CTkLabel(
             selector_card,
             text="Uso: abra um perfil em /reels/, passe o mouse em cima de um card para aparecer o overlay e clique no número/ícone de comentários. Esse será o único seletor usado; sem fallback.",
-            text_color="#9aa4b2",
+            text_color="#d8c5ff",
             font=ctk.CTkFont(size=12),
             wraplength=1120,
             justify="left",
-        ).grid(row=2, column=0, columnspan=3, padx=16, pady=(0, 14), sticky="w")
+        ).grid(row=2, column=0, columnspan=3, padx=12, pady=(0, 12), sticky="w")
 
-        action = ctk.CTkFrame(main, fg_color="#0b0f14")
-        action.grid(row=5, column=0, padx=24, pady=18, sticky="ew")
+        action = ctk.CTkFrame(main, fg_color="#170b2e")
+        action.grid(row=6, column=0, padx=20, pady=14, sticky="ew")
         action.grid_columnconfigure(2, weight=1)
 
         self.run_btn = ctk.CTkButton(
             action,
             text="EXECUTAR RMINER",
-            height=48,
+            height=42,
             width=210,
-            fg_color="#3164ff",
-            hover_color="#244dc7",
+            fg_color="#9b35ff",
+            hover_color="#7a24d6",
             font=ctk.CTkFont(size=15, weight="bold"),
             command=self.start_validation_thread,
         )
@@ -590,10 +661,10 @@ class App(ctk.CTk):
         self.stop_btn = ctk.CTkButton(
             action,
             text="PARAR",
-            height=48,
+            height=42,
             width=90,
-            fg_color="#7f1d1d",
-            hover_color="#991b1b",
+            fg_color="#8f1d5c",
+            hover_color="#b12a75",
             command=self.request_stop,
         )
         self.stop_btn.grid(row=0, column=1, padx=(0, 10), sticky="w")
@@ -601,34 +672,35 @@ class App(ctk.CTk):
         self.result_label = ctk.CTkLabel(
             action,
             text="AGUARDANDO",
-            text_color="#9aa4b2",
+            text_color="#d8c5ff",
             font=ctk.CTkFont(size=18, weight="bold"),
             anchor="e",
         )
         self.result_label.grid(row=0, column=2, sticky="e")
 
-        info = ctk.CTkFrame(main, fg_color="#121821", corner_radius=14)
-        info.grid(row=6, column=0, padx=24, pady=(0, 16), sticky="ew")
+        info = ctk.CTkFrame(main, fg_color="#24113f", corner_radius=10)
+        info.grid(row=7, column=0, padx=20, pady=(0, 12), sticky="ew")
 
-        ctk.CTkLabel(
+        self.info_label = ctk.CTkLabel(
             info,
-            text=f"Destino FY: {INSTAGRAM_REELS_URL}  |  Sessões: {SESSIONS_BASE_DIR}  |  Downloads: {DOWNLOADS_BASE_DIR}",
-            text_color="#9aa4b2",
+            text=f"Destino FY: {INSTAGRAM_REELS_URL}  |  Sessões: {SESSIONS_BASE_DIR}  |  Downloads: {self.get_downloads_dir()}",
+            text_color="#d8c5ff",
             font=ctk.CTkFont(size=13),
-        ).grid(row=0, column=0, padx=16, pady=12, sticky="w")
+        )
+        self.info_label.grid(row=0, column=0, padx=12, pady=4, sticky="w")
 
         self.log_box = ctk.CTkTextbox(
             log_panel,
-            fg_color="#121821",
-            border_color="#263243",
+            fg_color="#24113f",
+            border_color="#6d28d9",
             border_width=1,
-            text_color="#f5f7fb",
+            text_color="#fbf7ff",
             wrap="word",
         )
         ctk.CTkLabel(
             log_panel,
             text="Log",
-            text_color="#f5f7fb",
+            text_color="#fbf7ff",
             font=ctk.CTkFont(size=18, weight="bold"),
         ).grid(row=0, column=0, padx=(0, 24), pady=(24, 10), sticky="w")
         self.log_box.grid(row=1, column=0, padx=(0, 24), pady=(0, 24), sticky="nsew")
@@ -637,7 +709,7 @@ class App(ctk.CTk):
 
         self.log("Pronto.")
         self.log("Fluxo atual: encontra perfil na FY, entra no /reels/ do perfil aprovado, valida os Reels e baixa automaticamente os aprovados.")
-        self.log("Campos e perfil usado ficam salvos automaticamente em instagram_reels_gui_v19_config.json.")
+        self.log(f"Campos e perfil usado ficam salvos automaticamente em {CONFIG_PATH}.")
         self.log("Conexão e tempo de espera são automáticos; não precisam mais ser configurados na tela.")
 
     def load_config(self) -> dict:
@@ -652,6 +724,345 @@ class App(ctk.CTk):
 
         return {}
 
+    def get_downloads_dir(self) -> Path:
+        raw = ""
+        try:
+            if hasattr(self, "download_dir_entry"):
+                raw = self.download_dir_entry.get().strip()
+        except Exception:
+            raw = ""
+        if not raw:
+            raw = str(self.config.get("download_dir", "") or "")
+        return Path(raw) if raw else DOWNLOADS_BASE_DIR
+
+    def browse_download_dir(self):
+        initial = str(self.get_downloads_dir())
+        chosen = filedialog.askdirectory(title="Escolha onde salvar os Reels", initialdir=initial if Path(initial).exists() else str(APP_DIR))
+        if not chosen:
+            return
+        self.download_dir_entry.delete(0, "end")
+        self.download_dir_entry.insert(0, chosen)
+        self.update_info_label()
+        self.save_config()
+
+    def update_info_label(self):
+        if hasattr(self, "info_label"):
+            self.info_label.configure(
+                text=f"Destino FY: {INSTAGRAM_REELS_URL}  |  Sessões: {SESSIONS_BASE_DIR}  |  Downloads: {self.get_downloads_dir()}"
+            )
+
+    def default_profiles(self) -> List[ChromeProfile]:
+        return [
+            ChromeProfile(
+                id="perfil_1",
+                name="Perfil 1",
+                port="9222",
+                session=str(SESSIONS_BASE_DIR / "perfil_1"),
+                active=True,
+            )
+        ]
+
+    def normalize_profiles(self) -> List[ChromeProfile]:
+        raw_profiles = self.config.get("chrome_profiles")
+        if not isinstance(raw_profiles, list) or not raw_profiles:
+            raw_profiles = [
+                {
+                    "id": str(self.config.get("profile_safe_session_name") or "perfil_1"),
+                    "name": str(self.config.get("profile_name") or "Perfil 1"),
+                    "port": str(self.config.get("profile_port") or AUTO_CDP_PORT),
+                    "session": str(SESSIONS_BASE_DIR / "perfil_1"),
+                    "active": True,
+                }
+            ]
+
+        profiles = []
+        used_ids = set()
+        used_ports = set()
+        for index, item in enumerate(raw_profiles, start=1):
+            if not isinstance(item, dict):
+                continue
+            profile_id = str(item.get("id") or f"perfil_{index}").strip() or f"perfil_{index}"
+            base_id = profile_id
+            n = 2
+            while profile_id in used_ids:
+                profile_id = f"{base_id}_{n}"
+                n += 1
+            used_ids.add(profile_id)
+
+            name = str(item.get("name") or f"Perfil {index}").strip() or f"Perfil {index}"
+            port = str(item.get("port") or (9221 + index)).strip()
+            if not port.isdigit() or not (1024 <= int(port) <= 65535):
+                port = str(9221 + index)
+            while port in used_ports:
+                port = str(int(port) + 1)
+            used_ports.add(port)
+
+            session = str(item.get("session") or (SESSIONS_BASE_DIR / profile_id)).strip()
+            profiles.append(ChromeProfile(
+                id=profile_id,
+                name=name,
+                port=port,
+                session=session,
+                active=bool(item.get("active", True)),
+            ))
+
+        if not profiles:
+            profiles = self.default_profiles()
+        self.profiles = profiles
+        self.config["chrome_profiles"] = [self.profile_to_dict(p) for p in profiles]
+        return profiles
+
+    def profile_to_dict(self, profile: ChromeProfile) -> dict:
+        return {
+            "id": profile.id,
+            "name": profile.name,
+            "port": str(profile.port),
+            "session": str(profile.session),
+            "active": bool(profile.active),
+        }
+
+    def rebuild_profiles_list(self):
+        if not hasattr(self, "_profiles_list_frame"):
+            return
+        for widget in self._profiles_list_frame.winfo_children():
+            widget.destroy()
+        self._profile_check_vars = {}
+        self._profile_row_frames = {}
+
+        selected_index = self.profile_index()
+        for index, profile in enumerate(self.profiles):
+            selected = index == selected_index
+            row_bg = "#6d28d9" if selected else "#170b2e"
+            text_color = "#fbf7ff" if selected else "#eadcff"
+            status_text = "ativo" if profile.active else "desativado"
+            dot_color = "#4ade80" if profile.active else "#d8c5ff"
+
+            row = ctk.CTkFrame(self._profiles_list_frame, fg_color=row_bg, corner_radius=6)
+            row.grid(row=index, column=0, sticky="ew", padx=6, pady=(6 if index == 0 else 0, 6))
+            row.grid_columnconfigure(2, weight=1)
+            self._profile_row_frames[index] = row
+
+            dot = ctk.CTkLabel(row, text="●", width=18, text_color=dot_color, font=ctk.CTkFont(size=12))
+            dot.grid(row=0, column=0, padx=(8, 2), pady=4, sticky="w")
+
+            var = ctk.BooleanVar(value=bool(profile.active))
+            self._profile_check_vars[index] = var
+            check = ctk.CTkCheckBox(
+                row,
+                text="",
+                width=24,
+                variable=var,
+                fg_color="#9b35ff",
+                hover_color="#8b35f6",
+                border_color="#8b35f6",
+                command=lambda i=index, v=var: self.toggle_profile_active(i, v.get()),
+            )
+            check.grid(row=0, column=1, padx=(2, 4), pady=4, sticky="w")
+
+            label = ctk.CTkLabel(
+                row,
+                text=f"{profile.name}  |  {profile.port}  |  {status_text}",
+                text_color=text_color,
+                font=ctk.CTkFont(family="Consolas", size=12),
+                anchor="w",
+            )
+            label.grid(row=0, column=2, padx=(0, 8), pady=4, sticky="ew")
+
+            def select_row(_event=None, i=index):
+                self.select_profile_row(i)
+
+            for widget in (row, dot, label):
+                widget.bind("<Button-1>", select_row)
+
+    def select_profile_row(self, index: int):
+        if index is None or not (0 <= index < len(self.profiles)):
+            return
+        self.profile_var.set(self.profiles[index].label)
+        self.profile_selected()
+
+    def toggle_profile_active(self, index: int, active: bool):
+        if index is None or not (0 <= index < len(self.profiles)):
+            return
+        self.profiles[index].active = bool(active)
+        self.config["chrome_profiles"] = [self.profile_to_dict(p) for p in self.profiles]
+        self.profile_var.set(self.profiles[index].label)
+        if self.profile_index() == index:
+            self.profile_active_var.set(bool(active))
+        self.save_config()
+        self.rebuild_profiles_list()
+        self.log(f"Perfil Rminer {'ativado' if active else 'desativado'}: {self.profiles[index].name}")
+
+    def profile_index(self):
+        selected = self.profile_var.get() if hasattr(self, "profile_var") else ""
+        for index, profile in enumerate(self.profiles):
+            if profile.label == selected:
+                return index
+        return 0 if self.profiles else None
+
+    def profile_selected(self, _value=None):
+        index = self.profile_index()
+        if index is None or not (0 <= index < len(self.profiles)):
+            return
+        profile = self.profiles[index]
+        for entry, value in [
+            (self.profile_name_entry, profile.name),
+            (self.profile_port_entry, profile.port),
+            (self.profile_session_entry, profile.session),
+        ]:
+            entry.delete(0, "end")
+            entry.insert(0, str(value))
+        self.profile_active_var.set(bool(profile.active))
+        self.rebuild_profiles_list()
+
+    def validate_profile_editor(self) -> ChromeProfile:
+        index = self.profile_index()
+        current = self.profiles[index] if index is not None and 0 <= index < len(self.profiles) else None
+        name = self.profile_name_entry.get().strip()
+        port = self.profile_port_entry.get().strip()
+        session = self.profile_session_entry.get().strip()
+        if not name:
+            raise ValueError("Informe um nome para o perfil.")
+        if not port.isdigit():
+            raise ValueError("A porta precisa ser um número.")
+        port_num = int(port)
+        if not (1024 <= port_num <= 65535):
+            raise ValueError("A porta deve ficar entre 1024 e 65535.")
+        for other_index, other in enumerate(self.profiles):
+            if current is not None and other_index == index:
+                continue
+            if str(other.port) == str(port_num):
+                raise ValueError(f"A porta {port_num} já está sendo usada por '{other.name}'.")
+        if not session:
+            safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", name).strip("_") or f"perfil_{port_num}"
+            session = str(SESSIONS_BASE_DIR / safe)
+        return ChromeProfile(
+            id=current.id if current else f"perfil_{port_num}",
+            name=name,
+            port=str(port_num),
+            session=session,
+            active=bool(self.profile_active_var.get()),
+        )
+
+    def save_selected_profile(self):
+        if not hasattr(self, "profile_name_entry"):
+            return
+        index = self.profile_index()
+        if index is None or not (0 <= index < len(self.profiles)):
+            return
+        try:
+            profile = self.validate_profile_editor()
+        except ValueError as exc:
+            messagebox.showerror("Perfil Rminer", str(exc))
+            return
+        self.profiles[index] = profile
+        self.config["chrome_profiles"] = [self.profile_to_dict(p) for p in self.profiles]
+        self.save_config()
+        self.refresh_profiles(select_id=profile.id)
+        self.log(f"Perfil salvo: {profile.name} | porta {profile.port}")
+
+    def new_profile(self):
+        profiles = self.normalize_profiles()
+        used_ports = {int(p.port) for p in profiles if str(p.port).isdigit()}
+        port = 9222
+        while port in used_ports:
+            port += 1
+        used_ids = {p.id for p in profiles}
+        number = 1
+        while f"perfil_{number}" in used_ids:
+            number += 1
+        profile = ChromeProfile(
+            id=f"perfil_{number}",
+            name=f"Perfil {number}",
+            port=str(port),
+            session=str(SESSIONS_BASE_DIR / f"perfil_{number}"),
+            active=True,
+        )
+        self.profiles.append(profile)
+        self.config["chrome_profiles"] = [self.profile_to_dict(p) for p in self.profiles]
+        self.save_config()
+        self.refresh_profiles(select_id=profile.id)
+
+    def delete_selected_profile(self):
+        index = self.profile_index()
+        if index is None or not (0 <= index < len(self.profiles)):
+            return
+        if len(self.profiles) <= 1:
+            messagebox.showwarning("Perfil Rminer", "Deve existir pelo menos um perfil.")
+            return
+        profile = self.profiles[index]
+        if not messagebox.askyesno("Excluir perfil", f"Excluir '{profile.name}' da lista?\n\nA sessão salva no computador será mantida."):
+            return
+        self.profiles.pop(index)
+        self.config["chrome_profiles"] = [self.profile_to_dict(p) for p in self.profiles]
+        self.save_config()
+        self.refresh_profiles(select_id=self.profiles[max(0, index - 1)].id)
+
+    def browse_profile_session_dir(self):
+        initial = self.profile_session_entry.get().strip() or str(SESSIONS_BASE_DIR)
+        chosen = filedialog.askdirectory(title="Escolha a pasta da sessão Chrome", initialdir=initial if Path(initial).exists() else str(SESSIONS_BASE_DIR))
+        if chosen:
+            self.profile_session_entry.delete(0, "end")
+            self.profile_session_entry.insert(0, chosen)
+            self.save_selected_profile()
+
+    def active_profiles(self, limit: int = 0) -> List[ChromeProfile]:
+        profiles = [profile for profile in self.normalize_profiles() if profile.active]
+        if limit > 0:
+            return profiles[:limit]
+        return profiles
+
+    def open_selected_profile(self):
+        self.save_selected_profile()
+        profile = self.selected_profile()
+        if not profile:
+            messagebox.showwarning("Perfil Rminer", "Selecione um perfil para abrir.")
+            return
+        self.open_profiles_in_background([profile], title="Perfil Rminer")
+
+    def open_active_profiles(self):
+        self.save_selected_profile()
+        profiles = self.active_profiles()
+        if not profiles:
+            messagebox.showwarning("Perfis Rminer", "Marque pelo menos um perfil como ativo.")
+            return
+        self.open_profiles_in_background(profiles, title="Perfis Rminer")
+
+    def open_profiles_in_background(self, profiles: List[ChromeProfile], title: str = "Perfis Rminer"):
+        profiles = list(profiles or [])
+        if not profiles:
+            return
+        self.log(f"Abrindo {len(profiles)} perfil(is) em segundo plano...")
+
+        def open_one(profile):
+            try:
+                existed = Path(profile.session).exists()
+                ok = self.launch_chrome_debug(
+                    profile,
+                    int(profile.port),
+                    INSTAGRAM_REELS_URL,
+                    wait_ready=False,
+                )
+                return profile, existed, ok, None
+            except Exception as exc:
+                return profile, False, False, exc
+
+        def worker():
+            with ThreadPoolExecutor(max_workers=max(1, len(profiles))) as executor:
+                results = list(executor.map(open_one, profiles))
+
+            errors = [f"{profile.name}: {exc}" for profile, _existed, _ok, exc in results if exc]
+            created = [profile.name for profile, existed, ok, _exc in results if ok and not existed]
+
+            def finish():
+                if errors:
+                    messagebox.showerror(title, "Não consegui abrir todos os perfis:\n" + "\n".join(errors))
+                if created:
+                    self.log("Sessões novas criadas: " + ", ".join(created) + ". Faça login nas janelas abertas.")
+
+            self.after(0, finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def setup_persistent_fields(self):
         """Salva automaticamente os campos e o perfil escolhido sem precisar fechar o app."""
         try:
@@ -663,13 +1074,14 @@ class App(ctk.CTk):
                 self.parallel_tabs_entry,
                 self.download_target_entry,
                 self.reel_hours_entry,
+                self.download_dir_entry,
                 self.grid_comment_selector_entry,
             ]:
                 entry.bind("<KeyRelease>", lambda _event: self.schedule_save_config())
                 entry.bind("<FocusOut>", lambda _event: self.save_config())
                 entry.bind("<Return>", lambda _event: self.save_config())
 
-            self.profile_var.trace_add("write", lambda *_args: self.schedule_save_config())
+            self.profile_var.trace_add("write", lambda *_args: self.profile_selected())
             if hasattr(self, "profile_list_text"):
                 self.profile_list_text.bind("<KeyRelease>", lambda _event: self.schedule_save_config())
                 self.profile_list_text.bind("<FocusOut>", lambda _event: self.save_config())
@@ -678,6 +1090,7 @@ class App(ctk.CTk):
 
     def schedule_save_config(self):
         try:
+            self.update_info_label()
             if self._autosave_job:
                 self.after_cancel(self._autosave_job)
             self._autosave_job = self.after(600, self.save_config)
@@ -686,17 +1099,9 @@ class App(ctk.CTk):
 
     def save_config(self):
         try:
-            selected_profile = None
-            try:
-                selected_profile = self.selected_profile() if hasattr(self, "selected_profile") else None
-            except Exception:
-                selected_profile = None
-
             data = {
-                "profile_label": self.profile_var.get() if hasattr(self, "profile_var") else "",
-                "profile_safe_session_name": selected_profile.safe_session_name if selected_profile else "",
-                "profile_dir": selected_profile.profile_dir if selected_profile else "",
-                "profile_name": selected_profile.name if selected_profile else "",
+                "selected_profile_id": (self.selected_profile().id if hasattr(self, "selected_profile") and self.selected_profile() else ""),
+                "chrome_profiles": [self.profile_to_dict(p) for p in getattr(self, "profiles", [])],
                 "min_likes": self.min_likes_entry.get().strip() if hasattr(self, "min_likes_entry") else "1000",
                 "profile_keyword_required_count": self.required_entry.get().strip() if hasattr(self, "required_entry") else "1",
                 "profile_post_recent_days": self.recent_hours_entry.get().strip() if hasattr(self, "recent_hours_entry") else "1",
@@ -704,10 +1109,12 @@ class App(ctk.CTk):
                 "parallel_tabs": self.parallel_tabs_entry.get().strip() if hasattr(self, "parallel_tabs_entry") else "4",
                 "reel_required_count": self.download_target_entry.get().strip() if hasattr(self, "download_target_entry") else "1",
                 "reel_recent_days": self.reel_hours_entry.get().strip() if hasattr(self, "reel_hours_entry") else "1",
+                "download_dir": self.download_dir_entry.get().strip() if hasattr(self, "download_dir_entry") else str(DOWNLOADS_BASE_DIR),
                 "keyword_list": self.profile_list_text.get("1.0", "end").strip() if hasattr(self, "profile_list_text") else "",
                 "grid_comment_count_selector": self.grid_comment_selector_entry.get().strip() if hasattr(self, "grid_comment_selector_entry") else "",
             }
 
+            ASSETS_DIR.mkdir(parents=True, exist_ok=True)
             with CONFIG_PATH.open("w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -732,7 +1139,7 @@ class App(ctk.CTk):
         self.log("Importante: para contador da grade, deixe o overlay visível e clique exatamente no número/ícone de comentários.")
         try:
             with sync_playwright() as pw:
-                browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{AUTO_CDP_PORT}")
+                browser = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{self.get_port()}")
                 context = browser.contexts[0] if browser.contexts else None
                 if not context or not context.pages:
                     self.log("Não encontrei página aberta no Chrome para capturar seletor.")
@@ -1005,6 +1412,7 @@ class App(ctk.CTk):
                 self.log(f"{log_prefix}Nao encontrei cookies validos do Instagram para exportar.")
                 return False
 
+            ASSETS_DIR.mkdir(parents=True, exist_ok=True)
             AUTO_COOKIES_TXT_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
             self.log(f"{log_prefix}Cookies do Instagram exportados para yt-dlp: {kept} cookie(s).")
             return True
@@ -1012,7 +1420,7 @@ class App(ctk.CTk):
             self.log(f"{log_prefix}Falha ao exportar cookies para yt-dlp: {e}")
             return False
 
-    def set_result(self, text: str, color: str = "#9aa4b2"):
+    def set_result(self, text: str, color: str = "#d8c5ff"):
         def apply():
             self.result_label.configure(text=text, text_color=color)
         self.after(0, apply)
@@ -1029,38 +1437,23 @@ class App(ctk.CTk):
         self.log("Parada solicitada. Vou encerrar após a etapa atual.")
         self.set_result("PARANDO...", "#f5c542")
 
-    def refresh_profiles(self):
+    def refresh_profiles(self, select_id: str = ""):
         try:
-            self.profiles = load_chrome_profiles(self.user_data_dir)
-
-            # Se não achar perfis reais, cria uma sessão padrão.
-            if not self.profiles:
-                self.profiles = [ChromeProfile(name="Instagram", profile_dir="Default", email="")]
-
+            self.profiles = self.normalize_profiles()
             values = [p.label for p in self.profiles]
             self.profile_combo.configure(values=values)
 
             if values:
-                saved_profile = str(self.config.get("profile_label", ""))
-                saved_safe = str(self.config.get("profile_safe_session_name", ""))
-                saved_dir = str(self.config.get("profile_dir", ""))
-
+                saved_id = select_id or str(self.config.get("selected_profile_id", ""))
                 chosen = values[0]
-                if saved_profile in values:
-                    chosen = saved_profile
-                elif saved_safe:
+                if saved_id:
                     for profile in self.profiles:
-                        if profile.safe_session_name == saved_safe:
+                        if profile.id == saved_id:
                             chosen = profile.label
                             break
-                elif saved_dir:
-                    for profile in self.profiles:
-                        if profile.profile_dir == saved_dir:
-                            chosen = profile.label
-                            break
-
                 self.profile_var.set(chosen)
-                self.log(f"{len(values)} perfil(is)/sessão(ões) encontrado(s). Perfil selecionado: {chosen}")
+                self.profile_selected()
+                self.log(f"{len(values)} perfil(is) Rminer carregado(s). Perfil selecionado: {chosen}")
             else:
                 self.profile_var.set("")
                 self.log("Nenhum perfil encontrado.")
@@ -1068,20 +1461,23 @@ class App(ctk.CTk):
             self.log(f"Erro ao carregar perfis: {e}")
 
     def selected_profile(self) -> Optional[ChromeProfile]:
-        selected = self.profile_var.get()
-        for profile in self.profiles:
+        selected = self.profile_var.get() if hasattr(self, "profile_var") else ""
+        for profile in getattr(self, "profiles", []):
             if profile.label == selected:
                 return profile
         return None
 
     def get_port(self) -> int:
+        profile = self.selected_profile()
+        if profile and str(profile.port).isdigit():
+            return int(profile.port)
         return AUTO_CDP_PORT
 
     def get_wait_seconds(self) -> int:
         return AUTO_WAIT_SECONDS
 
     def get_session_dir(self, profile: ChromeProfile) -> Path:
-        return SESSIONS_BASE_DIR / profile.safe_session_name
+        return Path(profile.session or (SESSIONS_BASE_DIR / profile.safe_session_name))
 
     def reset_session_if_needed(self, session_dir: Path):
         # Sessão não é mais resetada pela interface. Mantém login/cookies do perfil isolado.
@@ -1089,16 +1485,30 @@ class App(ctk.CTk):
 
     def close_chrome_process(self):
         try:
+            closed = 0
+            for port, process in list(getattr(self, "chrome_processes", {}).items()):
+                if process and process.poll() is None:
+                    process.terminate()
+                    closed += 1
+                self.chrome_processes.pop(port, None)
             if self.chrome_process and self.chrome_process.poll() is None:
                 self.chrome_process.terminate()
-                self.chrome_process = None
-                self.log("Chrome iniciado pelo programa foi fechado.")
+                closed += 1
+            self.chrome_process = None
+            if closed:
+                self.log(f"{closed} Chrome(s) iniciado(s) pelo programa foram fechados.")
             else:
                 self.log("Nenhum Chrome iniciado por este programa para fechar.")
         except Exception as e:
             self.log(f"Erro ao fechar Chrome: {e}")
 
-    def launch_chrome_debug(self, profile: ChromeProfile, port: int, url: str = INSTAGRAM_REELS_URL) -> Optional[Path]:
+    def launch_chrome_debug(
+        self,
+        profile: ChromeProfile,
+        port: int,
+        url: str = INSTAGRAM_REELS_URL,
+        wait_ready: bool = True,
+    ) -> Optional[Path]:
         chrome_exe = find_chrome_exe()
 
         if not chrome_exe:
@@ -1108,9 +1518,9 @@ class App(ctk.CTk):
         SESSIONS_BASE_DIR.mkdir(parents=True, exist_ok=True)
         session_dir = self.get_session_dir(profile)
 
-        # Se a porta já está ativa, reaproveita o Chrome já aberto.
-        # Isso evita abrir várias instâncias na mesma porta.
-        if wait_debug_port(port, timeout=2):
+        # No fluxo automático, confirma se já existe um Chrome pronto nessa porta.
+        # Na abertura manual, o clique deve apenas disparar o Chrome sem prender a UI.
+        if wait_ready and wait_debug_port(port, timeout=2):
             self.log(f"Porta 127.0.0.1:{port} já está ativa. Reaproveitando Chrome aberto.")
             return session_dir
 
@@ -1127,15 +1537,36 @@ class App(ctk.CTk):
             url,
         ]
 
-        self.log(f"Abrindo Chrome isolado na porta {port}...")
+        self.log(f"Abrindo Chrome isolado [{profile.name}] na porta {port}...")
         self.log(f"Sessão: {session_dir}")
 
-        self.chrome_process = subprocess.Popen(cmd)
+        popen_kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if sys.platform.startswith("win"):
+            flags = 0
+            flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+            flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if flags:
+                popen_kwargs["creationflags"] = flags
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        process = subprocess.Popen(cmd, **popen_kwargs)
+        self.chrome_process = process
+        self.chrome_processes[str(port)] = process
+
+        if not wait_ready:
+            return session_dir
 
         time.sleep(1.5)
 
-        if self.chrome_process.poll() is not None:
-            self.log(f"Chrome fechou cedo. Código: {self.chrome_process.returncode}")
+        if process.poll() is not None:
+            self.log(f"Chrome fechou cedo. Código: {process.returncode}")
             return None
 
         if not wait_debug_port(port, timeout=25):
@@ -2330,7 +2761,7 @@ class App(ctk.CTk):
 
         if not profiles:
             self.log("Descoberta FY terminou sem perfis aprovados.")
-            self.set_result("NENHUM PERFIL", "#9aa4b2")
+            self.set_result("NENHUM PERFIL", "#d8c5ff")
             return
 
         self.log(f"Descoberta FY encontrou {len(profiles)} perfil(is) candidato(s): {', '.join('@' + p for p in profiles)}")
@@ -2618,16 +3049,16 @@ class App(ctk.CTk):
                 self.set_result(f"BAIXADOS {downloaded}/{len(final_items)}", "#4ade80")
             elif self.stop_requested:
                 self.log("Download automático interrompido pelo usuário.")
-                self.set_result("PARADO", "#9aa4b2")
+                self.set_result("PARADO", "#d8c5ff")
             else:
                 self.log("Nenhum dos Reels aprovados conseguiu ser baixado.")
                 self.set_result("FALHOU DOWNLOAD", "#ff5f5f")
         elif self.stop_requested:
             self.log("Validacao interrompida pelo usuario antes de encontrar Reels aprovados.")
-            self.set_result("PARADO", "#9aa4b2")
+            self.set_result("PARADO", "#d8c5ff")
         else:
             self.log("Rminer 2 terminou a lista sem separar Reels.")
-            self.set_result("NENHUM", "#9aa4b2")
+            self.set_result("NENHUM", "#d8c5ff")
 
     def run_validation(self):
         self.set_running(True)
@@ -2636,18 +3067,12 @@ class App(ctk.CTk):
         self.set_result("VALIDANDO...", "#f5c542")
 
         if not PLAYWRIGHT_AVAILABLE:
-            self.log("Playwright não instalado. Rode: py -m pip install playwright")
+            self.log("Playwright n?o instalado. Rode: py -m pip install playwright")
             self.set_result("SEM PLAYWRIGHT", "#ff5f5f")
             self.set_running(False)
             return
 
         try:
-            profile = self.selected_profile()
-            if not profile:
-                self.log("Selecione um perfil/sessão.")
-                self.set_result("ERRO", "#ff5f5f")
-                return
-
             min_likes = self.parse_int_entry(self.min_likes_entry, default=1000, minimum=0)
             profile_keyword_required_count = self.parse_int_entry(self.required_entry, default=1, minimum=1)
             profile_post_days = self.parse_float_entry(self.recent_hours_entry, default=1.0, minimum=0.1)
@@ -2659,8 +3084,8 @@ class App(ctk.CTk):
             parallel_tabs = self.parse_int_entry(self.parallel_tabs_entry, default=4, minimum=1)
             parallel_tabs = max(1, min(8, parallel_tabs))
             wait_seconds = self.get_wait_seconds()
-            port = self.get_port()
 
+            self.save_selected_profile()
             self.save_config()
             keywords = self.get_keyword_list()
             if not keywords:
@@ -2668,30 +3093,59 @@ class App(ctk.CTk):
                 self.set_result("SEM PALAVRAS", "#ff5f5f")
                 return
 
+            profiles = self.active_profiles(limit=min(parallel_tabs, reel_download_target))
+            if not profiles:
+                self.log("Marque pelo menos um perfil Rminer como ativo.")
+                self.set_result("SEM PERFIL", "#ff5f5f")
+                return
+
+            profile_count = len(profiles)
+            base_quota = reel_download_target // profile_count
+            remainder = reel_download_target % profile_count
+            quotas = [base_quota + (1 if idx < remainder else 0) for idx in range(profile_count)]
+            quotas = [quota for quota in quotas if quota > 0]
+            profiles = profiles[:len(quotas)]
+            workers_per_profile = max(1, parallel_tabs // max(1, len(profiles)))
+
             self.log(f"Meta de reels para baixar: {reel_download_target}.")
+            self.log(f"Perfis ativos em uso: {len(profiles)} | workers por perfil: {workers_per_profile}.")
+            for profile, quota in zip(profiles, quotas):
+                self.log(f"- {profile.name} | porta {profile.port} | meta {quota} Reel(s)")
             self.log(
                 f"Validação do perfil: likes >= {min_likes}; "
                 f"comentários-chave >= {profile_keyword_required_count}; "
-                f"postado até {profile_post_days:g} dia(s)."
+                f"postado at? {profile_post_days:g} dia(s)."
             )
             self.log(
                 f"Validação dos Reels do perfil: comentários >= {reel_required_count}; "
-                f"postado até {reel_max_days:g} dia(s)."
+                f"postado at? {reel_max_days:g} dia(s)."
             )
 
-            self.run_fy_discovery_validation(
-                profile=profile,
-                keywords=keywords,
-                keyword_required_count=profile_keyword_required_count,
-                min_likes=min_likes,
-                profile_post_days=profile_post_days,
-                reel_required_count=reel_required_count,
-                reel_max_days=reel_max_days,
-                target_to_open=reel_download_target,
-                parallel_tabs=parallel_tabs,
-                wait_seconds=wait_seconds,
-                port=port,
-            )
+            def run_profile(profile, quota):
+                self.run_fy_discovery_validation(
+                    profile=profile,
+                    keywords=keywords,
+                    keyword_required_count=profile_keyword_required_count,
+                    min_likes=min_likes,
+                    profile_post_days=profile_post_days,
+                    reel_required_count=reel_required_count,
+                    reel_max_days=reel_max_days,
+                    target_to_open=quota,
+                    parallel_tabs=workers_per_profile,
+                    wait_seconds=wait_seconds,
+                    port=int(profile.port),
+                )
+
+            if len(profiles) == 1:
+                run_profile(profiles[0], quotas[0])
+            else:
+                threads = []
+                for profile, quota in zip(profiles, quotas):
+                    thread = threading.Thread(target=run_profile, args=(profile, quota), daemon=True)
+                    threads.append(thread)
+                    thread.start()
+                for thread in threads:
+                    thread.join()
         except Exception as e:
             self.log(f"Erro geral na validação: {e}")
             self.log(traceback.format_exc())
@@ -2705,61 +3159,38 @@ class App(ctk.CTk):
         return match.group(1) if match else ""
 
     def download_approved_reel(self, shortcode: str, post_info: dict) -> bool:
-        """
-        Baixa o Reel aprovado usando yt-dlp (em vez de Instaloader).
-
-        Motivo da troca: o Instaloader 4.15.x está sofrendo bloqueio 403
-        no endpoint graphql/query do Instagram (bug ativo e ainda sem fix,
-        afeta todo mundo, não é específico desta conta/sessão). O yt-dlp
-        usa outro caminho para resolver a URL do vídeo, então não depende
-        dessa mesma consulta GraphQL.
-        """
+        """Baixa o Reel aprovado usando yt-dlp."""
         shortcode = (shortcode or post_info.get("shortcode") or "").strip()
 
         if not shortcode:
-            self.log("Não consegui baixar: shortcode vazio.")
+            self.log("N?o consegui baixar: shortcode vazio.")
             return False
 
         if not ensure_yt_dlp_installed(log_fn=self.log):
-            self.log("yt-dlp não está disponível e não foi possível instalar automaticamente.")
+            self.log("yt-dlp n?o est? dispon?vel e n?o foi poss?vel instalar automaticamente.")
             return False
 
         import yt_dlp
 
         url = post_info.get("url") or self.make_reel_review_url(shortcode)
-
-        # Estratégia de cookies, em ordem de preferência:
-        # 1) cookies.txt exportado manualmente (mais confiável - o yt-dlp não
-        #    consegue ler cookies do Chrome 127+ diretamente por causa da
-        #    App-Bound Encryption do Chrome, então essa é a via que funciona).
-        # 2) perfil do Chrome selecionado na interface, como fallback (pode
-        #    falhar com "Failed to decrypt with DPAPI" em Chrome recente).
-        # 3) sem cookies (anônimo) - só baixa posts públicos.
         auto_cookies_txt = AUTO_COOKIES_TXT_PATH if AUTO_COOKIES_TXT_PATH.exists() else None
         manual_cookies_txt = COOKIES_TXT_PATH if COOKIES_TXT_PATH.exists() else None
-        chrome_profile = self.selected_profile() if hasattr(self, "selected_profile") else None
         cookies_txt = auto_cookies_txt or manual_cookies_txt
 
         if auto_cookies_txt:
-            self.log(f"yt-dlp vai usar cookies automaticos de: {auto_cookies_txt}")
+            self.log(f"yt-dlp vai usar cookies autom?ticos de: {auto_cookies_txt}")
         elif manual_cookies_txt:
             self.log(f"yt-dlp vai usar cookies manuais de: {manual_cookies_txt}")
-        elif chrome_profile and chrome_profile.profile_dir:
-            self.log(
-                f"Aviso: {COOKIES_TXT_PATH.name} não encontrado. "
-                f"Tentando ler direto do perfil Chrome '{chrome_profile.profile_dir}' "
-                f"(pode falhar em Chrome recente - exporte um cookies.txt se isso acontecer)."
-            )
         else:
             self.log(
-                f"Aviso: {COOKIES_TXT_PATH.name} não encontrado e nenhum perfil Chrome selecionado. "
-                f"Tentando sem autenticação (só funciona para posts públicos)."
+                f"Aviso: {COOKIES_TXT_PATH.name} n?o encontrado. "
+                "Tentando sem autenticação (só funciona para posts públicos)."
             )
 
         try:
-            DOWNLOADS_BASE_DIR.mkdir(parents=True, exist_ok=True)
-
-            outtmpl = str(DOWNLOADS_BASE_DIR / "%(upload_date)s_UTC_%(id)s.%(ext)s")
+            downloads_dir = self.get_downloads_dir()
+            downloads_dir.mkdir(parents=True, exist_ok=True)
+            outtmpl = str(downloads_dir / "%(upload_date)s_UTC_%(id)s.%(ext)s")
 
             ydl_opts = {
                 "outtmpl": outtmpl,
@@ -2770,27 +3201,18 @@ class App(ctk.CTk):
                 "noprogress": True,
                 "retries": 3,
             }
-
             if cookies_txt:
                 ydl_opts["cookiefile"] = str(cookies_txt)
-            elif chrome_profile and chrome_profile.profile_dir:
-                ydl_opts["cookiesfrombrowser"] = ("chrome", chrome_profile.profile_dir)
-            elif chrome_profile is None and not cookies_txt:
-                pass  # roda anônimo mesmo
 
             self.log(f"Baixando Reel aprovado via yt-dlp: {shortcode}")
-
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
             except Exception as e:
-                # Fallback: se a leitura de cookies falhar (ex.: DPAPI do
-                # Chrome recente, ou cookies.txt corrompido), tenta sem cookies.
-                if "cookiefile" in ydl_opts or "cookiesfrombrowser" in ydl_opts:
+                if "cookiefile" in ydl_opts:
                     self.log(f"Aviso: falha lendo cookies ({e}). Tentando sem cookies...")
                     ydl_opts_no_cookies = dict(ydl_opts)
                     ydl_opts_no_cookies.pop("cookiefile", None)
-                    ydl_opts_no_cookies.pop("cookiesfrombrowser", None)
                     with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:
                         info = ydl.extract_info(url, download=True)
                 else:
@@ -2805,7 +3227,7 @@ class App(ctk.CTk):
             if owner:
                 self.log(f"Download: @{owner}")
 
-            self.log(f"DOWNLOAD OK ✅ Pasta: {DOWNLOADS_BASE_DIR.resolve()}")
+            self.log(f"DOWNLOAD OK ? Pasta: {downloads_dir.resolve()}")
             return True
 
         except Exception as e:
@@ -2825,8 +3247,6 @@ class App(ctk.CTk):
         url = self.make_reel_review_url(shortcode)
         auto_cookies_txt = AUTO_COOKIES_TXT_PATH if AUTO_COOKIES_TXT_PATH.exists() else None
         manual_cookies_txt = COOKIES_TXT_PATH if COOKIES_TXT_PATH.exists() else None
-        chrome_profile = self.selected_profile() if hasattr(self, "selected_profile") else None
-
         base_opts = {
             "quiet": True,
             "no_warnings": True,
@@ -2846,10 +3266,6 @@ class App(ctk.CTk):
                 opts = dict(base_opts)
                 opts["cookiefile"] = str(manual_cookies_txt)
                 attempts.append(("cookies-manual", opts))
-            if chrome_profile and chrome_profile.profile_dir:
-                opts = dict(base_opts)
-                opts["cookiesfrombrowser"] = ("chrome", chrome_profile.profile_dir)
-                attempts.append(("cookiesfrombrowser", opts))
             attempts.append(("sem-cookies", dict(base_opts)))
 
             info = None
@@ -2920,8 +3336,6 @@ class App(ctk.CTk):
         url = self.make_reel_review_url(shortcode)
         auto_cookies_txt = AUTO_COOKIES_TXT_PATH if AUTO_COOKIES_TXT_PATH.exists() else None
         manual_cookies_txt = COOKIES_TXT_PATH if COOKIES_TXT_PATH.exists() else None
-        chrome_profile = self.selected_profile() if hasattr(self, "selected_profile") else None
-
         base_opts = {
             "quiet": True,
             "no_warnings": True,
@@ -2940,10 +3354,6 @@ class App(ctk.CTk):
             opts = dict(base_opts)
             opts["cookiefile"] = str(manual_cookies_txt)
             attempts.append(("cookies-manual", opts))
-        if chrome_profile and chrome_profile.profile_dir:
-            opts = dict(base_opts)
-            opts["cookiesfrombrowser"] = ("chrome", chrome_profile.profile_dir)
-            attempts.append(("cookiesfrombrowser", opts))
         attempts.append(("sem-cookies", dict(base_opts)))
 
         errors = []

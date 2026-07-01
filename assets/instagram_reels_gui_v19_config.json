@@ -1,0 +1,36 @@
+{
+  "selected_profile_id": "perfil_2",
+  "chrome_profiles": [
+    {
+      "id": "HOT_hotdavinci@gmail.com_Profile_8",
+      "name": "1",
+      "port": "9222",
+      "session": "C:\\Temp\\instagram_reels_validator\\1",
+      "active": true
+    },
+    {
+      "id": "perfil_1",
+      "name": "2",
+      "port": "9223",
+      "session": "C:\\Temp\\instagram_reels_validator\\2",
+      "active": true
+    },
+    {
+      "id": "perfil_2",
+      "name": "3",
+      "port": "9224",
+      "session": "C:\\Temp\\instagram_reels_validator\\3",
+      "active": false
+    }
+  ],
+  "min_likes": "100",
+  "profile_keyword_required_count": "1",
+  "profile_post_recent_days": "7",
+  "reel_download_target": "1",
+  "parallel_tabs": "2",
+  "reel_required_count": "10",
+  "reel_recent_days": "7",
+  "download_dir": "C:\\Users\\cieiw\\Desktop\\• scripts\\Rminer\\• Reels",
+  "keyword_list": "linda\nlimda\nmaravilhosa\ngostosa\ngata\ngatona\namizade\ndelicia\ndelícia\ngstz\namor",
+  "grid_comment_count_selector": "div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > ul:nth-of-type(1) > li:nth-of-type(2) > span:nth-of-type(1) > span:nth-of-type(1)"
+}
