@@ -854,22 +854,19 @@ class App(ctk.CTk):
         if not records:
             return "Nenhuma conta salva."
 
-        latest_dt = None
-        for record in records:
-            raw = str(record.get("last_validated_at") or record.get("first_validated_at") or "")
-            try:
-                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except Exception:
-                continue
-            if latest_dt is None or dt > latest_dt:
-                latest_dt = dt
+        first_record = records[0]
+        raw = str(first_record.get("first_validated_at") or first_record.get("last_validated_at") or "")
+        try:
+            first_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            first_dt = None
 
-        if latest_dt is None:
-            return f"{len(records)} conta(s) salva(s). Último: sem data."
+        if first_dt is None:
+            return f"{len(records)} conta(s) salva(s). Primeiro salvo: sem data."
 
         now = datetime.now(timezone.utc)
-        days = max(0, int((now - latest_dt).total_seconds() // 86400))
-        return f"{len(records)} conta(s) salva(s). Último perfil validado há {days} dia(s)."
+        days = max(0, int((now - first_dt).total_seconds() // 86400))
+        return f"{len(records)} conta(s) salva(s). Primeiro salvo há {days} dia(s)."
 
     def update_validated_profiles_label(self) -> None:
         if not hasattr(self, "validated_profiles_label"):
@@ -2751,7 +2748,77 @@ class App(ctk.CTk):
         parallel_tabs: int,
         wait_seconds: int,
         port: int,
-    ) -> None:
+    ) -> int:
+        total_downloaded = 0
+        remaining = max(1, int(target_to_open))
+        cycle = 0
+        stalled_cycles = 0
+        max_cycles = max(3, int(target_to_open) * 3)
+
+        while not self.stop_requested and remaining > 0 and cycle < max_cycles:
+            cycle += 1
+            if cycle > 1:
+                self.log(
+                    f"Voltando para a FY ({INSTAGRAM_REELS_URL}) para continuar. "
+                    f"Faltam {remaining}/{target_to_open} Reel(s); mantendo limite de data de {reel_max_days:g} dia(s)."
+                )
+
+            downloaded = self._run_fy_discovery_validation_cycle(
+                profile=profile,
+                keywords=keywords,
+                keyword_required_count=keyword_required_count,
+                min_likes=min_likes,
+                profile_post_days=profile_post_days,
+                reel_required_count=reel_required_count,
+                reel_max_days=reel_max_days,
+                target_to_open=remaining,
+                parallel_tabs=parallel_tabs,
+                wait_seconds=wait_seconds,
+                port=port,
+                cycle=cycle,
+            )
+            downloaded = max(0, int(downloaded or 0))
+            total_downloaded += downloaded
+            remaining = max(0, int(target_to_open) - total_downloaded)
+
+            if downloaded > 0:
+                stalled_cycles = 0
+                self.log(f"Rodada {cycle}: {downloaded} Reel(s) baixado(s). Total: {total_downloaded}/{target_to_open}.")
+            else:
+                stalled_cycles += 1
+                self.log(f"Rodada {cycle}: nenhum Reel novo baixado.")
+                if stalled_cycles >= 2:
+                    self.log("Parei depois de 2 rodadas sem baixar Reel novo. A FY nao entregou candidatos suficientes dentro das regras.")
+                    break
+
+            if remaining > 0 and not self.stop_requested:
+                time.sleep(random.uniform(1.0, 2.0))
+
+        if self.stop_requested:
+            self.set_result("PARADO", "#d8c5ff")
+        elif total_downloaded >= int(target_to_open):
+            self.log(f"Meta concluida: {total_downloaded}/{target_to_open} Reel(s) baixado(s).")
+            self.set_result(f"CONCLUIDO {total_downloaded}/{target_to_open}", "#4ade80")
+        elif total_downloaded > 0:
+            self.log(f"Processo terminou com {total_downloaded}/{target_to_open} Reel(s) baixado(s).")
+            self.set_result(f"BAIXADOS {total_downloaded}/{target_to_open}", "#f59e0b")
+        return total_downloaded
+
+    def _run_fy_discovery_validation_cycle(
+        self,
+        profile: ChromeProfile,
+        keywords: list,
+        keyword_required_count: int,
+        min_likes: int,
+        profile_post_days: float,
+        reel_required_count: int,
+        reel_max_days: float,
+        target_to_open: int,
+        parallel_tabs: int,
+        wait_seconds: int,
+        port: int,
+        cycle: int = 1,
+    ) -> int:
         profile_post_max_hours = profile_post_days * 24
         self.log(
             f"Descoberta FY/perfil: likes >= {min_likes} + "
@@ -2762,14 +2829,14 @@ class App(ctk.CTk):
         session_dir = self.launch_chrome_debug(profile, port, INSTAGRAM_REELS_URL)
         if not session_dir:
             self.set_result("FALHOU PORTA", "#ff5f5f")
-            return
+            return 0
 
         discovered_profiles = []
         discovered_set = set()
         checked_shortcodes = set()
         state_lock = threading.Lock()
         workers = []
-        max_profiles = max(parallel_tabs * 10, target_to_open * 10)
+        max_profiles = max(parallel_tabs * 2, target_to_open)
         max_cycles_per_worker = max(120, target_to_open * 100)
         target_reached_event = threading.Event()
 
@@ -2783,6 +2850,23 @@ class App(ctk.CTk):
             with state_lock:
                 return len(discovered_profiles) < max_profiles
 
+        def ensure_fy_page(page, tab_index: int, reason: str = "") -> bool:
+            current_url = page.url or ""
+            if self.is_fy_reels_url(current_url):
+                return True
+            suffix = f" ({reason})" if reason else ""
+            self.log(f"Aba {tab_index}: estava fora da FY{suffix}: {current_url}. Voltando para {INSTAGRAM_REELS_URL}")
+            try:
+                page.goto(INSTAGRAM_REELS_URL, wait_until="domcontentloaded", timeout=wait_seconds * 1000)
+                page.wait_for_timeout(1800)
+                if not self.is_fy_reels_url(page.url or ""):
+                    self.log(f"Aba {tab_index}: ainda nao voltou para a FY. URL atual: {page.url}")
+                    return False
+                return True
+            except Exception as e:
+                self.log(f"Aba {tab_index}: falha ao voltar para a FY: {e}")
+                return False
+
         def advance_fy_page(page, tab_index: int, steps: int = 1, reason: str = "") -> None:
             steps = max(1, int(steps))
             if reason:
@@ -2790,6 +2874,8 @@ class App(ctk.CTk):
             for step in range(steps):
                 if not should_continue():
                     self.log(f"Aba {tab_index}: salto interrompido; parada solicitada ou meta atingida.")
+                    break
+                if not ensure_fy_page(page, tab_index, reason="antes de saltar Reel da FY"):
                     break
                 try:
                     before = self.extract_shortcode_from_url(page.url)
@@ -2839,11 +2925,7 @@ class App(ctk.CTk):
                 with sync_playwright() as worker_pw:
                     browser = worker_pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
                     context = browser.contexts[0] if browser.contexts else browser.new_context()
-                    existing_pages = [p for p in context.pages if not p.is_closed()]
-                    if tab_index == 1 and existing_pages:
-                        page = existing_pages[0]
-                    else:
-                        page = context.new_page()
+                    page = context.new_page()
                     page.goto(INSTAGRAM_REELS_URL, wait_until="domcontentloaded", timeout=wait_seconds * 1000)
                     page.wait_for_timeout(2500)
                     self.export_ytdlp_cookies_from_page(page, log_prefix=f"Aba {tab_index}: ")
@@ -2859,6 +2941,8 @@ class App(ctk.CTk):
                     cycle = 0
                     while should_continue() and cycle < max_cycles_per_worker:
                         cycle += 1
+                        if not ensure_fy_page(page, tab_index, reason="inicio do ciclo FY"):
+                            break
                         shortcode = self.extract_shortcode_from_url(page.url)
                         self.log(f"Aba {tab_index}: FY ciclo {cycle} | shortcode={shortcode or 'indefinido'}")
 
@@ -2903,6 +2987,10 @@ class App(ctk.CTk):
                             continue
 
                         if not shortcode:
+                            if not self.is_fy_reels_url(page.url or ""):
+                                self.log(f"Aba {tab_index}: shortcode indefinido porque saiu da FY. Corrigindo rota.")
+                                ensure_fy_page(page, tab_index, reason="shortcode indefinido fora da FY")
+                                continue
                             self.log(f"Aba {tab_index}: shortcode indefinido; nao consigo validar data do perfil. Pulando.")
                             advance_fy_page(page, tab_index, reason="sem shortcode/data")
                             continue
@@ -2975,16 +3063,9 @@ class App(ctk.CTk):
                             owner_marked_current = True
 
                         if add_profile(owner, shortcode, tab_index, likes_count, matches):
-                            try:
-                                profile_url = f"https://www.instagram.com/{owner}/reels/"
-                                self.log(f"Aba {tab_index}: entrando no perfil aprovado na mesma aba: @{owner}")
-                                page.goto(profile_url, wait_until="domcontentloaded", timeout=wait_seconds * 1000)
-                                page.wait_for_timeout(1800)
-                                kept_profile_page = True
-                            except Exception as e:
-                                self.log(f"Aba {tab_index}: nao consegui entrar no perfil aprovado na mesma aba: {e}")
                             if not should_continue():
                                 break
+                            ensure_fy_page(page, tab_index, reason=f"depois de coletar @{owner}")
                             advance_fy_page(page, tab_index, reason="perfil coletado")
                         else:
                             self.log(
@@ -3018,10 +3099,10 @@ class App(ctk.CTk):
         if not profiles:
             self.log("Descoberta FY terminou sem perfis aprovados.")
             self.set_result("NENHUM PERFIL", "#d8c5ff")
-            return
+            return 0
 
-        self.log(f"Descoberta FY encontrou {len(profiles)} perfil(is) candidato(s): {', '.join('@' + p for p in profiles)}")
-        self.run_profile_list_validation(
+        self.log(f"Descoberta FY rodada {cycle} encontrou {len(profiles)} perfil(is) candidato(s): {', '.join('@' + p for p in profiles)}")
+        return self.run_profile_list_validation(
             profile=profile,
             profiles_to_scan=profiles,
             required_count=reel_required_count,
@@ -3044,7 +3125,7 @@ class App(ctk.CTk):
         parallel_tabs: int,
         wait_seconds: int,
         port: int,
-    ) -> None:
+    ) -> int:
         comment_recent_hours = comment_recent_days * 24
         reel_max_hours = reel_max_days * 24
         first_url = f"https://www.instagram.com/{profiles_to_scan[0]}/reels/" if profiles_to_scan else INSTAGRAM_REELS_URL
@@ -3060,7 +3141,7 @@ class App(ctk.CTk):
         if not grid_comment_selector:
             self.log("Validação dos Reels parada: configure o seletor do contador de comentários da grade no Painel de Seletores Fixos.")
             self.set_result("CONFIGURE SELETOR", "#f59e0b")
-            return
+            return 0
 
         profile_worker_total = max(1, min(int(parallel_tabs), len(profiles_to_scan), max(1, int(target_to_open))))
         self.log(f"Rminer: validando {len(profiles_to_scan)} perfil(is) aprovado(s) pela FY.")
@@ -3072,7 +3153,7 @@ class App(ctk.CTk):
         session_dir = self.launch_chrome_debug(profile, port, first_url)
         if not session_dir:
             self.set_result("FALHOU PORTA", "#ff5f5f")
-            return
+            return 0
 
         approved_shortcodes = set()
         checked_shortcodes = set()
@@ -3244,19 +3325,7 @@ class App(ctk.CTk):
                         list_index, username = item
 
                         if page is None or page.is_closed():
-                            existing_pages = [p for p in context.pages if not p.is_closed()]
-                            preferred = None
-                            for candidate in existing_pages:
-                                try:
-                                    if username.lower() in (candidate.url or "").lower():
-                                        preferred = candidate
-                                        break
-                                except Exception:
-                                    pass
-                            if preferred is None and existing_pages:
-                                # Não abre aba nova se já existe uma aba reutilizável no Chrome isolado.
-                                preferred = existing_pages[0]
-                            page = preferred if preferred is not None else context.new_page()
+                            page = context.new_page()
 
                         validate_profile(page, tab_index, list_index, username)
 
@@ -3264,6 +3333,11 @@ class App(ctk.CTk):
                 self.log(f"Aba {tab_index}: worker de perfis caiu com erro: {e}")
                 self.log(traceback.format_exc())
             finally:
+                try:
+                    if page and not page.is_closed():
+                        page.close()
+                except Exception:
+                    pass
                 self.log(f"Aba {tab_index}: worker de perfis finalizado.")
 
         for idx in range(1, profile_worker_total + 1):
@@ -3309,12 +3383,14 @@ class App(ctk.CTk):
             else:
                 self.log("Nenhum dos Reels aprovados conseguiu ser baixado.")
                 self.set_result("FALHOU DOWNLOAD", "#ff5f5f")
+            return downloaded
         elif self.stop_requested:
             self.log("Validacao interrompida pelo usuario antes de encontrar Reels aprovados.")
             self.set_result("PARADO", "#d8c5ff")
         else:
             self.log("Rminer 2 terminou a lista sem separar Reels.")
             self.set_result("NENHUM", "#d8c5ff")
+        return 0
 
     def run_validation(self):
         self.set_running(True)
@@ -3362,7 +3438,7 @@ class App(ctk.CTk):
             quotas = [base_quota + (1 if idx < remainder else 0) for idx in range(profile_count)]
             quotas = [quota for quota in quotas if quota > 0]
             profiles = profiles[:len(quotas)]
-            workers_per_profile = max(1, parallel_tabs // max(1, len(profiles)))
+            workers_per_profile = parallel_tabs
 
             self.log(f"Meta de reels para baixar: {reel_download_target}.")
             self.log(
@@ -3417,6 +3493,9 @@ class App(ctk.CTk):
     def extract_shortcode_from_url(self, url: str) -> str:
         match = re.search(r"/(?:reel|reels|p)/([^/?#]+)/?", url or "", re.I)
         return match.group(1) if match else ""
+
+    def is_fy_reels_url(self, url: str) -> bool:
+        return bool(re.match(r"^https?://(?:www\.)?instagram\.com/reels(?:/|$|[?#])", url or "", re.I))
 
     def download_approved_reel(self, shortcode: str, post_info: dict) -> bool:
         """Baixa o Reel aprovado usando yt-dlp."""

@@ -1,4 +1,60 @@
-Na verdade era pra mostrar quantos dias tem o primeiro salvo na lista
+aparentemente ele está pulando os reels dentro do proprio perfil kkk, mas dentro dos reels do perfil n e pra olhar isso, e so pra validar a quantidade das coisas especificadas e adata de postagem pra baixar, e ainda nao esta abrindo a quantidade de abas que botei
 
 
-E quando chega ao final dos reels da conta, nao esta voltando para a fy, tem que voltar para a fy, instagram.com/reels e continuar o processo até completar a quantia de reels especificada, não se esqueça da data limite que não pode passar do post do reel
+
+
+1:04
+
+
+
+
+
+
+Entendi o “kkk”: na etapa do perfil ele não deveria agir como FY. Vou separar mais explicitamente as duas fases: FY só descobre perfis; perfil só checa data do post e contador configurado para baixar. Também vou conferir por que o número de abas digitado ainda não está virando abas reais.
+
+
+
+
+Executou 4 comandos
+
+
+
+Achei um sinal forte no seu log: ele está salvando config em C:\Users\cieiw\Desktop\..., mas este arquivo que estou editando está em C:\Users\cieiw2\Desktop\rminer. Isso explica por que as abas e as correções parecem não pegar: você provavelmente está abrindo uma cópia/atalho antigo. Vou conferir o alvo do atalho e também deixar o código mais explícito na parte dos perfis.
+
+
+
+
+Executou 3 comandos
+
+
+
+O atalho está apontando para C:\Users\cieiw\Desktop\• scripts\Rminer\Rminer.pyw, ou seja, outra cópia. Vou corrigir o Rminer.lnk desta pasta para abrir C:\Users\cieiw2\Desktop\rminer\Rminer.pyw; isso deve resolver tanto “não abriu as abas” quanto “voltou a frase antiga”.
+
+
+
+
+Executou um comando
+
+
+
+Trabalhou por 55s
+
+
+
+
+Também vou trocar o texto dos logs dentro do perfil para não parecer que ele está “pulando FY”. Tecnicamente ele já valida só data + contador da grade ali, mas a mensagem “pulando” confunde mesmo.
+
+
+
+
+Editando um arquivo•  linhas
+
+
+
+
+
+
+
+Você atingiu seu limite de uso. Faça upgrade do plano ou adicione créditos para continuar, ou tente novamente em 05:23.
+
+
